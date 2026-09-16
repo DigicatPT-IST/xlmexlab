@@ -382,15 +382,12 @@ class ModelVLM(BaseModel):
             }
         ]
 
-        outputs: list[RequestOutput] = self.model.generate(prompts=new_prompt)
-        final_response: str = ""
-        for o in outputs:
-            completion = o[1][0][0]
-            print("Generation info:", completion.generation_info)
-            final_response += completion.text
+        output = self.model.generate(prompt, self.params)[0]
+        generated_text: str = output.outputs[0].text
+        print(output.finish_reason)
 
-            break
-        return final_response
+        return generated_text
+
 
 class ModelVLM2(BaseModel):
     model_name: str
