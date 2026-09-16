@@ -354,22 +354,44 @@ class ModelVLM(BaseModel):
             break
         return final_response
 
-def run_image_single_prompt(self, prompt: str, image_path: str) -> str:
-    pil_image: ImageFile = Image.open(image_path)
-    new_prompt: Dict[str, Any] = [
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": pil_image},
-        }
-    ]
-    outputs: list[RequestOutput] = self.model.generate(new_prompt)
-    final_response: str = ""
-    for o in outputs:
-        completion = o[1][0][0]
-        final_response += completion.text
-        print(f"Finish reason: {completion.finish_reason}")
-        break
-    return final_response
+    def run_image_single_prompt_rescale(
+        self, prompt: str, image_path: str, scale: float = 1.0
+    ) -> str:
+        """Run a single prompt on the loaded vision language model with the option to rescale the image
+
+        Args:
+            prompt (str): prompt to the loaded model
+            image_path (str): file path for the image
+            scale (float, optional): rescale factor to use. Defaults to 1.0.
+
+        Returns:
+            str: a string containing the model response
+        """
+        pil_image: ImageFile = Image.open(image_path)
+        if scale < 1.0:
+            new_size: Tuple[int, int] = (
+                int(pil_image.width * scale),
+                int(pil_image.height * scale),
+            )
+            pil_image = pil_image.resize(new_size, Image.BILINEAR)
+
+        new_prompt: Dict[str, Any] = [
+            {
+                "prompt": prompt,
+                "multi_modal_data": {"image": pil_image},
+            }
+        ]
+
+        outputs: list[RequestOutput] = self.model.generate(prompts=new_prompt)
+        final_response: str = ""
+        for o in outputs:
+            completion = o[1][0][0]
+
+            final_response += completion.text
+            finish_reason = completion.finish_reason
+
+            print("Finish reason:", finish_reason)
+        return final_response
 
 class ModelVLM2(BaseModel):
     model_name: str
