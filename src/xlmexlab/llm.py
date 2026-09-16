@@ -386,12 +386,9 @@ class ModelVLM(BaseModel):
         final_response: str = ""
         for o in outputs:
             completion = o[1][0][0]
-
-            print(type(completion))
-            print(completion)
-            print(dir(completion))
-
+            print("Generation info:", completion.generation_info)
             final_response += completion.text
+
             break
         return final_response
 
