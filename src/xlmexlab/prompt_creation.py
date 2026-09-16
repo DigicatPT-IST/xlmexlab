@@ -826,7 +826,6 @@ class PromptCreationVerifySeriesPrompt(BaseModel):
             "Remove points that do not belong to this series.",
             "Do not infer points that are not visibly supported by the graph.",
             "Use N/A when a coordinate cannot be read reliably.",
-            "Use only the numerical precision supported by the axes.",
             "Return only the requested schema; no reasoning or extra text.",
         ]
 

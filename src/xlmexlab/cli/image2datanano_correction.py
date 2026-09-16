@@ -13,7 +13,7 @@ from xlmexlab.prompt import TEMPLATE_REGISTRY
 @click.argument("input_json_path", type=str)
 @click.argument("images_folder", type=str)
 @click.argument("output_json_path", type=str)
-@click.option("--vlm_model_name", default="Qwen/Qwen3.5-27B-FP8", help="VLM used for verification.")
+@click.option("--vlm_model_name", default="Qwen/Qwen3.5-9B", help="VLM used for verification.")
 @click.option("--vlm_model_parameters_path", default=None, help="Model parameters path (vllm inference).")
 @click.option("--prompt_template_path", default=None, help="Prompt template path.")
 @click.option("--scale", default=1.0, type=float, help="Scale factor for image resolution.")

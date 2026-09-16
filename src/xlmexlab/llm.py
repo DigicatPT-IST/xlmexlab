@@ -383,13 +383,13 @@ class ModelVLM(BaseModel):
         ]
 
         outputs: list[RequestOutput] = self.model.generate(prompts=new_prompt)
-        final_response: str = ""
-        for o in outputs:
-            completion = o[1][0][0]
-            final_response += completion.text
-            finish_reason = completion.finish_reason
-            print(f"Finish reason: {finish_reason}")
-            break
+        outputs = self.model.generate(new_prompt)
+
+        completion = outputs[0].outputs[0]
+
+        final_response = completion.text
+
+        print("Finish reason:", completion.finish_reason)
         return final_response
 
 class ModelVLM2(BaseModel):
