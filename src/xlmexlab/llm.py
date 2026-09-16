@@ -387,10 +387,12 @@ class ModelVLM(BaseModel):
         for o in outputs:
             completion = o[1][0][0]
 
-            final_response += completion.text
-            finish_reason = completion.finish_reason
+            print(type(completion))
+            print(completion)
+            print(dir(completion))
 
-            print("Finish reason:", finish_reason)
+            final_response += completion.text
+            break
         return final_response
 
 class ModelVLM2(BaseModel):
