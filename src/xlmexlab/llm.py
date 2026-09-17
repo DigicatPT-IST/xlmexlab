@@ -417,8 +417,7 @@ class ModelVLM2(BaseModel):
                 quantization=self.model_parameters["quantization"],
                 max_model_len=self.model_parameters["max_model_len"],
                 gpu_memory_utilization=self.model_parameters["gpu_memory_utilization"],
-                seed=self.model_parameters["seed"],
-                max_seq_len_to_capture=self.model_parameters["max_seq_len_to_capture"]
+                seed=self.model_parameters["seed"]
             )
 
             print("Ended Model Loading")
