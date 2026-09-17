@@ -406,9 +406,9 @@ class ModelVLM2(BaseModel):
     def vllm_load_model(self) -> None:
         """Load a model using vllm library"""
         if self.model_parameters == {}:
-            self.model = VLLM(model=self.model_name)
+            self.model = LLM(model=self.model_name)
         else:
-            self.model = VLLM(
+            self.model = LLM(
                 model=self.model_name,
                 tensor_parallel_size=self.model_parameters["tensor_parallel_size"],
                 dtype=self.model_parameters["dtype"],
