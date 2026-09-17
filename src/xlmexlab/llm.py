@@ -481,7 +481,7 @@ class ModelVLM2(BaseModel):
             break
         return final_response
 
-    def run_image_single_prompt_rescalevlm2(
+    def run_image_single_prompt_rescale(
         self, prompt: str, image_path: str, scale: float = 1.0
     ) -> str:
         """Run a single prompt on the loaded vision language model with the option to rescale the image

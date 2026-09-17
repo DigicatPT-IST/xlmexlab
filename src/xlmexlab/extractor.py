@@ -49,7 +49,7 @@ from xlmexlab.actions import (
     Transfer,
     Wash,
 )
-from xlmexlab.llm import ModelLLM, ModelVLM, AIeduLLM, OpenAILLM
+from xlmexlab.llm import ModelLLM, ModelVLM2, AIeduLLM, OpenAILLM
 from xlmexlab.parser import (
     MOLAR_RATIO_REGISTRY,
     ActionsParser,
@@ -1900,7 +1900,7 @@ class TableExtractor(BaseModel):
     vlm_model_name: Optional[str] = None
     vlm_model_parameters_path: Optional[str] = None
     _prompt: Optional[PromptFormatter] = PrivateAttr(default=None)
-    _vlm_model: Optional[ModelVLM] = PrivateAttr(default=None)
+    _vlm_model: Optional[ModelVLM2] = PrivateAttr(default=None)
     #_condition_parser: Optional[LaTeXTableParser] = PrivateAttr(default=None) # Latex
 
     def model_post_init(self, __context: Any) -> None:
@@ -1923,9 +1923,9 @@ class TableExtractor(BaseModel):
         self._prompt = PromptFormatter(**prompt_dict)
         self._prompt.model_post_init(self.prompt_template_path)
         if self.vlm_model_name is None:
-            self._vlm_model = ModelVLM(model_name="microsoft/Phi-3-medium-4k-instruct")
+            self._vlm_model = ModelVLM2(model_name="microsoft/Phi-3-medium-4k-instruct")
         else:
-            self._vlm_model = ModelVLM(model_name=self.vlm_model_name)
+            self._vlm_model = ModelVLM2(model_name=self.vlm_model_name)
         self._vlm_model.load_model_parameters(vlm_param_path)
         self._vlm_model.vllm_load_model()
         #self._condition_parser = LaTeXTableParser() #latex
@@ -2101,13 +2101,13 @@ class List2Headers(BaseModel):
     vlm_model_name: Optional[str] = None
     vlm_model_parameters_path: Optional[str] = None
 
-    _vlm_model: Optional[ModelVLM] = PrivateAttr(default=None)
+    _vlm_model: Optional[ModelVLM2] = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any = None) -> None:
         if self.vlm_model_name is None:
-            self._vlm_model = ModelVLM(model_name="microsoft/Phi-3-medium-4k-instruct")
+            self._vlm_model = ModelVLM2(model_name="microsoft/Phi-3-medium-4k-instruct")
         else:
-            self._vlm_model = ModelVLM(model_name=self.vlm_model_name)
+            self._vlm_model = ModelVLM2(model_name=self.vlm_model_name)
 
         if self.vlm_model_parameters_path is None:
             vlm_param_path = str(
@@ -2173,7 +2173,7 @@ class ImageExtractor(BaseModel):
     vlm_model_name: Optional[str] = None
     vlm_model_parameters_path: Optional[str] = None
     _prompt: Optional[PromptFormatter] = PrivateAttr(default=None)
-    _vlm_model: Optional[ModelVLM] = PrivateAttr(default=None)
+    _vlm_model: Optional[ModelVLM2] = PrivateAttr(default=None)
     _image_parser: Optional[ImageParser] = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
@@ -2198,9 +2198,9 @@ class ImageExtractor(BaseModel):
         #VLM loading
         self._prompt.model_post_init(self.prompt_template_path)
         if self.vlm_model_name is None:
-            self._vlm_model = ModelVLM(model_name="Llama2-70B-chat-hf")
+            self._vlm_model = ModelVLM2(model_name="Llama2-70B-chat-hf")
         else:
-            self._vlm_model = ModelVLM(model_name=self.vlm_model_name)
+            self._vlm_model = ModelVLM2(model_name=self.vlm_model_name)
         self._vlm_model.load_model_parameters(vlm_param_path)
         self._vlm_model.vllm_load_model()
         
