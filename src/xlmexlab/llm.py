@@ -481,7 +481,7 @@ class ModelVLM2(BaseModel):
             break
         return final_response
 
-    def run_image_single_prompt_rescale(
+    def run_image_single_prompt_rescalevlm2(
         self, prompt: str, image_path: str, scale: float = 1.0
     ) -> str:
         """Run a single prompt on the loaded vision language model with the option to rescale the image
@@ -512,9 +512,9 @@ class ModelVLM2(BaseModel):
         if self.model is None:
             raise AttributeError("The LLM model is not loaded")
         if self.model_parameters == {}:
-            output: list[RequestOutput] = self.model.generate(prompt)[0]
+            output: list[RequestOutput] = self.model.generate(new_prompt)[0]
         elif self.model_parameters["use_beam_search"] is False:
-            output = self.model.generate(prompt, self.params)[0]
+            output = self.model.generate(new_prompt, self.params)[0]
             generated_text: str = output.outputs[0].text
         candidate = output.outputs[0]
         print(f"Finish reason: {candidate.finish_reason}")
