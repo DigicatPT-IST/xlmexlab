@@ -12,7 +12,7 @@ from PIL import Image
 from pydantic import BaseModel, PrivateAttr, validator
 
 from xlmexlab import parser
-from xlmexlab.llm import ModelLLM, ModelVLM
+from xlmexlab.llm import ModelLLM, ModelVLM2
 from xlmexlab.prompt import PromptFormatter
 from xlmexlab.prompt_creation import PromptCreation, PromptCreationImageKeys, PromptCreationIsGraphPrompt, PromptCreationSchedule, PromptCreationLipidComposition, PromptCreationLoadStatus, PromptCreationLipidRatioUnits, PromptCreationFormulationRegistry, PromptCreationCargoCategoryCheck, PromptCreationLipidRatio, PromptCreationSeriesDataPrompt, PromptCreationVerifySeriesPrompt
 from xlmexlab.parser_nanoparticles import ParserNanoparticle, ImageParserKeys, SeriesPointsParser
@@ -363,7 +363,7 @@ class ImageExtractor(BaseModel):
     vlm_model_name: Optional[str] = None
     vlm_model_parameters_path: Optional[str] = None
     _prompt: Optional[PromptFormatter] = PrivateAttr(default=None)
-    _vlm_model: Optional[ModelVLM] = PrivateAttr(default=None)
+    _vlm_model: Optional[ModelVLM2] = PrivateAttr(default=None)
     _image_parser: Optional[ImageParserKeys] = PrivateAttr(default=None)
     _series_prompt_builder: Optional[PromptCreationSeriesDataPrompt] = PrivateAttr(default=None)
     _is_graph_prompt_builder: Optional[PromptCreationIsGraphPrompt] = PrivateAttr(default=None)
@@ -386,10 +386,10 @@ class ImageExtractor(BaseModel):
         self._prompt.model_post_init(self.prompt_template_path)
 
         if self.vlm_model_name is None:
-            self._vlm_model = ModelVLM(model_name="Llama2-70B-chat-hf")
+            self._vlm_model = ModelVLM2(model_name="Llama2-70B-chat-hf")
         else:
-            self._vlm_model = ModelVLM(model_name=self.vlm_model_name)
-
+            self._vlm_model = ModelVLM2(model_name=self.vlm_model_name)
+    
         self._vlm_model.load_model_parameters(vlm_param_path)
         self._vlm_model.vllm_load_model()
         #self._image_parser = ImageParser()
@@ -498,7 +498,7 @@ class SeriesVerifier:
         self.prompt_template_path = prompt_template_path
         self._verify_prompt_builder = PromptCreationVerifySeriesPrompt()
 
-        self._vlm_model = ModelVLM(model_name=vlm_model_name)
+        self._vlm_model = ModelVLM2(model_name=vlm_model_name)
         self._vlm_model.load_model_parameters(vlm_model_parameters_path)
         self._vlm_model.vllm_load_model()
 
