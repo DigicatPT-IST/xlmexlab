@@ -1,0 +1,8 @@
+{
+  "expertise": "You are an expert in material preparation.",
+  "initialization": "Answer the questions as truthfully as possible. Answer No if you are unsure. Be objective in your response.",
+  "objective":"Analyse the following paragraph:",
+  "definitions": {},
+  "answer_schema": {},
+  "conclusion":  "What is the water or steam flow in the text?. If the pressure is no mentioned, just respond that does not exist."
+}
