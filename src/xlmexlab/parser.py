@@ -2208,7 +2208,6 @@ class ImageParser(BaseModel):
         for series_name, axes in data.items():
 
             keys = list(axes.keys())
-            print(len(keys))
             if len(keys) < 2:
                 continue
 
