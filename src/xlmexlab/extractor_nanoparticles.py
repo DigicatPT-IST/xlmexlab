@@ -404,7 +404,7 @@ class ImageExtractor(BaseModel):
         formatter.model_post_init(self.prompt_template_path)
         prompt = formatter.format_prompt("<image>")
 
-        output = self._vlm_model.run_image_single_prompt_rescalevlm2(
+        output = self._vlm_model.run_image_single_prompt_rescale(
             prompt, image_path, scale=scale
         )
         print(f"\n  [ImageExtractor.is_graph] response: {output!r}")
@@ -418,7 +418,7 @@ class ImageExtractor(BaseModel):
         print(f"\n  [ImageExtractor.extract_image_info] PROMPT SENT TO VLM")
         print(prompt)
 
-        output = self._vlm_model.run_image_single_prompt_rescalevlm2(
+        output = self._vlm_model.run_image_single_prompt_rescale(
             prompt, image_path, scale=scale)
         print(f"\n  [ImageExtractor.extract_image_info] VLM RAW RESPONSE")
         print(output)
@@ -472,9 +472,7 @@ class ImageExtractor(BaseModel):
             print(f"\n  [ImageExtractor.extract_series_data] PROMPT FOR SERIES '{series_name}'")
             print(prompt)
 
-            output = self._vlm_model.run_image_single_prompt_rescalevlm2(
-                prompt, image_path, scale=scale
-            )
+            output = self._vlm_model.run_image_single_prompt_rescale(prompt, image_path, scale=scale)
             print(f"\n  [ImageExtractor.extract_series_data] VLM RAW RESPONSE for '{series_name}'")
             print(output)
 
@@ -525,7 +523,7 @@ class SeriesVerifier:
         print(f"\n  [SeriesVerifier] VERIFY PROMPT for '{series_name}'")
         print(prompt)
 
-        output = self._vlm_model.run_image_single_prompt_rescalevlm2(
+        output = self._vlm_model.run_image_single_prompt_rescale(
             prompt, image_path, scale=scale
         )
         print(f"\n  [SeriesVerifier] VERIFY RESPONSE for '{series_name}'")
