@@ -739,44 +739,51 @@ class PromptCreationSeriesDataPrompt(BaseModel):
         series_line: str
     ) -> dict:
         expertise = (
-            "You are an expert in precisely locating data points on scientific graphs using their axis tick marks as reference points."
+            "You are an OCR expert in precisely locating data points on scientific graphs using their axis tick marks as reference points."
         )
 
         initialization = ""
 
         objective = objective = (
-            f'Extract all visible data points belonging ONLY to the series "{series_name}". '
-            f'This series is visually identified in the legend as: color={series_color}, '
+            f'Extract all visible data points belonging to the serie "{series_name}". '
+            f'The target series is identified by: color={series_color}, '
             f'marker={series_marker}, line style={series_line}. '
-            f'Use this visual identification focus ONLY on this serie.'
+            f'Ignore every other series, line, annotation, label, or graphical element. '
             f'The x-axis is "{x_axis}" with visible ticks {x_ticks}. '
             f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
         )
 
         schema = """SERIES: <series name>
+                POINTS: <count>
                 POINTS:
-                - (x1, y1)
-                - (x2, y2)
-                - (x3, y3)"""
-
+                tick_x_low=<value>, tick_x_high=<value>, frac_x=<0.000-1.000>,
+                tick_y_low=<value>, tick_y_high=<value>, frac_y=<0.000-1.000>,
+                visibility=<VISIBLE|PARTIAL|INFERED>,
+                confidence=<0.00-1.00>
+                """
         rules = [
-            "1. Start by focusing only on the requested series.",
-            "2. Read points from left to right along the x-axis.",
-            "3. Determine each x-value using the nearest visible x-axis ticks.",
-            "4. Determine each y-value using the nearest visible y-axis ticks.",
-            "5. When the point lies between ticks, estimate values with maximum PRECISION.",
-            "6. Do not infer points that are not visibly present.",
-            "7. If a coordinate cannot be determined confidently, use N/A for that coordinate.",
-            "8. Ensure every x-value has exactly one corresponding y-value.",
-            "9. Return points ONLY in the format shown: one '(x, y)' pair per line, prefixed with '-'.",
+                "1. Focus exclusively on the requested series.",
+                "2. Ignore all other series and chart elements.",
+                "3. Count visible markers before extracting coordinates.",
+                "5. Identify neighboring x-axis ticks.",
+                "6. Identify neighboring y-axis ticks.",
+                "7. Report frac_x and frac_y with up to 3 decimal places.",
+                "6. If a marker is partially hidden, estimate its coordinates using visible portions."
+                "8. If a marker is fully occluded, infer its position from:"
+                    "- the trajectory of the target series,"
+                    "- neighboring visible markers,"
+                    "- line continuity,"
+                    "- marker spacing,"
+                    "- and the target series visual style."
         ]
 
         return {
             "expertise": expertise,
             "initialization": initialization,
             "definitions": {
-                "data_point": "A pair consisting of one x-value and its corresponding y-value.",
-                "unknown": "Use N/A when a coordinate cannot be determined confidently.",
+                "VISIBLR": "A data point that is clearly visible.",
+                "PARTIAL": "A data point that is only partially visible.",
+                "HIDDEN" : "A data point that is completely occluded"
             },
             "objective": objective,
             "answer_schema": {
