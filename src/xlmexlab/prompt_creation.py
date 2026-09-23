@@ -742,12 +742,12 @@ class PromptCreationSeriesDataPrompt(BaseModel):
             "You are an OCR expert in precisely locating data points on scientific graphs using their axis tick marks as reference points."
         )
 
-        initialization = ""
+        initialization = "A background grid may have been added to improve positional precision. Use it only as a measurement reference; do not count grid lines as data."
 
         objective = objective = (
             f'Extract all visible data points belonging to the serie "{series_name}". '
             f'The target series is identified by: color={series_color}, '
-            f'marker={series_marker}, line style={series_line}. '
+            f'marker={series_marker} '
             f'Ignore every other series, line, annotation, label, or graphical element. '
             f'The x-axis is "{x_axis}" with visible ticks {x_ticks}. '
             f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
@@ -758,32 +758,38 @@ class PromptCreationSeriesDataPrompt(BaseModel):
                 POINTS:
                 tick_x_low=<value>, tick_x_high=<value>, frac_x=<0.000-1.000>,
                 tick_y_low=<value>, tick_y_high=<value>, frac_y=<0.000-1.000>,
-                visibility=<VISIBLE|PARTIAL|INFERED>,
-                confidence=<0.00-1.00>
                 """
         rules = [
-                "1. Focus exclusively on the requested series.",
+                f'1. Focus exclusively on {series_name} serie .',
                 "2. Ignore all other series and chart elements.",
                 "3. Count visible markers before extracting coordinates.",
-                "5. Identify neighboring x-axis ticks.",
-                "6. Identify neighboring y-axis ticks.",
+                "5. Identify the two neighboring x-axis ticks for each marker.",
+                "6. Identify the two neighboring y-axis ticks for each marker.",
                 "7. Report frac_x and frac_y with up to 3 decimal places.",
                 "6. If a marker is partially hidden, estimate its coordinates using visible portions."
-                "8. If a marker is fully occluded, infer its position from:"
-                    "- the trajectory of the target series,"
-                    "- neighboring visible markers,"
-                    "- line continuity,"
-                    "- marker spacing,"
-                    "- and the target series visual style."
+                "7. After extracting all points, verify that POINT_COUNT equals the number of entries in POINTS"
         ]
 
         return {
             "expertise": expertise,
             "initialization": initialization,
             "definitions": {
-                "VISIBLR": "A data point that is clearly visible.",
-                "PARTIAL": "A data point that is only partially visible.",
-                "HIDDEN" : "A data point that is completely occluded"
+                "POINTS": (
+                    "A data point is represented by the geometric center of a visible "
+                    "marker belonging to the target series."
+                ),
+                "frac_x": (
+                    "Normalized horizontal position of the marker between "
+                    "tick_x_low and tick_x_high. "
+                    "0.000 = exactly at tick_x_low; "
+                    "1.000 = exactly at tick_x_high."
+                ),
+                "frac_y": (
+                    "Normalized vertical position of the marker between  "
+                    "tick_y_low and tick_y_high. "
+                    "0.000 = exactly at tick_y_low; "
+                    "1.000 = exactly at tick_y_high. "
+                ),
             },
             "objective": objective,
             "answer_schema": {
@@ -791,8 +797,8 @@ class PromptCreationSeriesDataPrompt(BaseModel):
                 "Rules": "\n".join(f"- {r}" for r in rules),
             },
             "conclusion": (
-                "Return ONLY the requested structure. "
-                "Do not include reasoning, explanations, markdown, or extra text outside the POINTS list."
+                f'Return ONLY the requested structure for {series_name} serie.'
+                "Do not include reasoning, explanations, markdown, or extra text."
             ),
             }
 
