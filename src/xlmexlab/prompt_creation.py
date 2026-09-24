@@ -724,6 +724,142 @@ SERIES:
         }
 
 
+def make_tick_windows(n_ticks: int, ticks_per_window: int = 3, overlap_ticks: int = 1):
+    """
+    Split n_ticks tick indices into overlapping windows.
+    Returns a list of (start_idx, end_idx) inclusive tick-index ranges.
+    Same windowing logic as the image-crop version, but here it's used to
+    slice the TEXT tick list only -- the image itself is never cropped.
+    """
+    if overlap_ticks >= ticks_per_window:
+        raise ValueError("overlap_ticks must be smaller than ticks_per_window.")
+    if ticks_per_window < 2:
+        raise ValueError("ticks_per_window must be >= 2 (a window needs two tick anchors).")
+
+    windows = []
+    start = 0
+    while start < n_ticks - 1:
+        end = min(start + ticks_per_window - 1, n_ticks - 1)
+        windows.append((start, end))
+        if end == n_ticks - 1:
+            break
+        start = end - overlap_ticks
+    return windows
+
+
+class PromptCreationSeriesDataPrompt(BaseModel):
+
+    def build_window_prompts_json(
+        self,
+        x_axis: str,
+        x_ticks: List[str],
+        y_axis: str,
+        y_ticks: List[str],
+        series_name: str,
+        series_color: str,
+        series_marker: str,
+        series_line: str,
+        ticks_per_window: int = 3,
+        overlap_ticks: int = 1,
+    ) -> List[dict]:
+        """
+        Build one prompt per x-tick window. The full (uncropped) image is sent
+        every time; only the x-tick list passed in the prompt narrows, so the
+        model is told to restrict its attention to that x-range and ignore
+        every marker outside it. y_ticks are always passed in full since the
+        y-axis is never windowed.
+        """
+        windows = make_tick_windows(len(x_ticks), ticks_per_window, overlap_ticks)
+        prompts = []
+
+        for start_idx, end_idx in windows:
+            window_x_ticks = x_ticks[start_idx:end_idx + 1]
+            x_low, x_high = window_x_ticks[0], window_x_ticks[-1]
+
+            expertise = (
+                "You are an OCR expert in precisely locating data points on "
+                "scientific graphs using their axis tick marks as reference points."
+            )
+
+            initialization = (
+                "A background grid may have been added to improve positional "
+                "precision. Use it only as a measurement reference; do not "
+                "count grid lines as data. The full chart image is shown, but "
+                "you must only report points inside the x-range specified below."
+            )
+
+            objective = (
+                f'Extract all visible data points belonging to the series "{series_name}" '
+                f'(color={series_color}, marker={series_marker}, line={series_line}) '
+                f'whose x-value falls between "{x_low}" and "{x_high}" on the "{x_axis}" axis, inclusive. '
+                f'Ignore every point of this series that falls outside this x-range -- '
+                f'even if it is visible in the image, it belongs to a different window and '
+                f'must not be reported here. '
+                f'Ignore every other series, line, annotation, label, or graphical element. '
+                f'The x-axis ticks relevant to this window are {window_x_ticks}. '
+                f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
+            )
+
+            schema = """SERIES: <series name>
+                POINTS:
+                - (x1, y1)
+                - (x2, y2)
+                - (x3, y3)
+                ..."""
+
+            rules = [
+                f'1. Focus exclusively on the "{series_name}" series.',
+                f'2. Only report points with x between "{x_low}" and "{x_high}", inclusive.',
+                "3. Ignore all other series and chart elements.",
+                "4. Ignore points of this same series that lie outside the current x-range.",
+                "5. Count visible markers in-range before extracting coordinates.",
+                "8. All detected point with maximum precision",
+                "9. If a marker is partially hidden, estimate its coordinates using visible portions.",
+                "10. After extracting all points, verify that count equals the number of entries listed.",
+            ]
+
+            prompt = {
+                "expertise": expertise,
+                "initialization": initialization,
+                "definitions": {
+                    "POINTS": (
+                        "A data point is represented by the geometric center of a "
+                        "visible marker belonging to the target series, within the "
+                        "current x-window only."
+                    ),
+                    "frac_x": (
+                        "Normalized horizontal position of the marker between "
+                        "tick_x_low and tick_x_high. 0.000 = exactly at tick_x_low; "
+                        "1.000 = exactly at tick_x_high."
+                    ),
+                    "frac_y": (
+                        "Normalized vertical position of the marker between "
+                        "tick_y_low and tick_y_high. 0.000 = exactly at tick_y_low; "
+                        "1.000 = exactly at tick_y_high."
+                    ),
+                },
+                "objective": objective,
+                "answer_schema": {
+                    "Format": schema,
+                    "Rules": "\n".join(f"- {r}" for r in rules),
+                },
+                "conclusion": (
+                    f'Return ONLY the requested structure for the "{series_name}" series, '
+                    f'restricted to x between "{x_low}" and "{x_high}". '
+                    "Do not include reasoning, explanations, markdown, or extra text."
+                ),
+                # metadata to help you route/merge results later; not sent to the model
+                "_window_meta": {
+                    "tick_index_range": [start_idx, end_idx],
+                    "x_low": x_low,
+                    "x_high": x_high,
+                },
+            }
+            prompts.append(prompt)
+
+        return prompts
+
+
 
 class PromptCreationSeriesDataPrompt(BaseModel):
 
