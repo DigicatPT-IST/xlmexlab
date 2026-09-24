@@ -723,6 +723,84 @@ SERIES:
             ),
         }
 
+class PromptCreationSeriesDataPrompt(BaseModel):
+
+    def build_series_prompt_json(
+        self,
+        x_axis: str,
+        x_ticks: List[str],
+        y_axis: str,
+        y_ticks: List[str],
+        series_name: str,
+        series_color: str,
+        series_marker: str,
+        series_line: str
+    ) -> dict:
+        expertise = (
+            "You are an expert in precisely locating data points on scientific graphs "
+            "using axis tick marks and grid lines as geometric reference points."
+        )
+
+        initialization = (
+            "Carefully inspect the entire graph before extracting any values. "
+            "Pay particular attention to the axes, their tick marks, and the grid lines "
+            "added to guide precise point localization. "
+            "Use these visual references to estimate the coordinates as accurately as possible."
+        )
+
+        objective = (
+            f'Extract all visible data points belonging ONLY to the series "{series_name}". '
+            f'This series is visually identified in the legend by: '
+            f'color={series_color}, marker={series_marker}, line style={series_line}. '
+            f'Use these visual characteristics to identify and follow ONLY this series. '
+            f'The x-axis is "{x_axis}" with visible ticks {x_ticks}. '
+            f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
+        )
+
+        schema = """SERIES: <series name>
+        POINTS:
+        - (x1, y1)
+        - (x2, y2)
+        - (x3, y3)"""
+
+        rules = [
+            f'1. Start by identifying and following ONLY the "{series_name}" series.',
+            "2. Read the data points from left to right along the x-axis.",
+            "3. Determine each x-value by locating the point relative to the visible x-axis tick marks and the added vertical grid lines.",
+            "4. Determine each y-value by locating the point relative to the visible y-axis tick marks and the added horizontal grid lines.",
+            "5. Use the grid lines as precise geometric guides when determining the position of each point.",
+            "7. Do not infer, invent, or add points that are not visibly present in the graph.",
+            "8. If a coordinate cannot be determined with sufficient confidence, use N/A for that coordinate.",
+            "9. Each extracted point must contain exactly one x-value and one corresponding y-value.",
+            "10. Preserve the actual number of visible data points; do not create additional points based on the line connecting them.",
+            "11. Return points ONLY in the format shown: one '(x, y)' pair per line, prefixed with '-'.",
+        ]
+
+        return {
+            "expertise": expertise,
+            "initialization": initialization,
+            "definitions": {
+                "data_point": (
+                    "A visible point belonging to the requested series, "
+                    "represented by its x-coordinate and corresponding y-coordinate."
+                ),
+                "unknown": (
+                    "Use N/A when a coordinate cannot be determined confidently "
+                    "from the graph and its tick/grid references."
+                ),
+            },
+            "objective": objective,
+            "answer_schema": {
+                "Format": schema,
+                "Rules": "\n".join(f"- {r}" for r in rules),
+            },
+            "conclusion": (
+                "Return ONLY the requested structure. "
+                "Do not include reasoning, explanations, markdown, or any extra text "
+                "outside the requested POINTS list."
+            ),
+        }
+
 
 def make_tick_windows(n_ticks: int, ticks_per_window: int = 3, overlap_ticks: int = 1):
     """
@@ -747,196 +825,7 @@ def make_tick_windows(n_ticks: int, ticks_per_window: int = 3, overlap_ticks: in
     return windows
 
 
-class PromptCreationSeriesDataPrompt(BaseModel):
 
-    def build_window_prompts_json(
-        self,
-        x_axis: str,
-        x_ticks: List[str],
-        y_axis: str,
-        y_ticks: List[str],
-        series_name: str,
-        series_color: str,
-        series_marker: str,
-        series_line: str,
-        ticks_per_window: int = 3,
-        overlap_ticks: int = 1,
-    ) -> List[dict]:
-        """
-        Build one prompt per x-tick window. The full (uncropped) image is sent
-        every time; only the x-tick list passed in the prompt narrows, so the
-        model is told to restrict its attention to that x-range and ignore
-        every marker outside it. y_ticks are always passed in full since the
-        y-axis is never windowed.
-        """
-        windows = make_tick_windows(len(x_ticks), ticks_per_window, overlap_ticks)
-        prompts = []
-
-        for start_idx, end_idx in windows:
-            window_x_ticks = x_ticks[start_idx:end_idx + 1]
-            x_low, x_high = window_x_ticks[0], window_x_ticks[-1]
-
-            expertise = (
-                "You are an OCR expert in precisely locating data points on "
-                "scientific graphs using their axis tick marks as reference points."
-            )
-
-            initialization = (
-                "A background grid may have been added to improve positional "
-                "precision. Use it only as a measurement reference; do not "
-                "count grid lines as data. The full chart image is shown, but "
-                "you must only report points inside the x-range specified below."
-            )
-
-            objective = (
-                f'Extract all visible data points belonging to the series "{series_name}" '
-                f'(color={series_color}, marker={series_marker}, line={series_line}) '
-                f'whose x-value falls between "{x_low}" and "{x_high}" on the "{x_axis}" axis, inclusive. '
-                f'Ignore every point of this series that falls outside this x-range -- '
-                f'even if it is visible in the image, it belongs to a different window and '
-                f'must not be reported here. '
-                f'Ignore every other series, line, annotation, label, or graphical element. '
-                f'The x-axis ticks relevant to this window are {window_x_ticks}. '
-                f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
-            )
-
-            schema = """SERIES: <series name>
-                POINTS:
-                - (x1, y1)
-                - (x2, y2)
-                - (x3, y3)
-                ..."""
-
-            rules = [
-                f'1. Focus exclusively on the "{series_name}" series.',
-                f'2. Only report points with x between "{x_low}" and "{x_high}", inclusive.',
-                "3. Ignore all other series and chart elements.",
-                "4. Ignore points of this same series that lie outside the current x-range.",
-                "5. Count visible markers in-range before extracting coordinates.",
-                "8. All detected point with maximum precision",
-                "9. If a marker is partially hidden, estimate its coordinates using visible portions.",
-                "10. After extracting all points, verify that count equals the number of entries listed.",
-            ]
-
-            prompt = {
-                "expertise": expertise,
-                "initialization": initialization,
-                "definitions": {
-                    "POINTS": (
-                        "A data point is represented by the geometric center of a "
-                        "visible marker belonging to the target series, within the "
-                        "current x-window only."
-                    ),
-                    "frac_x": (
-                        "Normalized horizontal position of the marker between "
-                        "tick_x_low and tick_x_high. 0.000 = exactly at tick_x_low; "
-                        "1.000 = exactly at tick_x_high."
-                    ),
-                    "frac_y": (
-                        "Normalized vertical position of the marker between "
-                        "tick_y_low and tick_y_high. 0.000 = exactly at tick_y_low; "
-                        "1.000 = exactly at tick_y_high."
-                    ),
-                },
-                "objective": objective,
-                "answer_schema": {
-                    "Format": schema,
-                    "Rules": "\n".join(f"- {r}" for r in rules),
-                },
-                "conclusion": (
-                    f'Return ONLY the requested structure for the "{series_name}" series, '
-                    f'restricted to x between "{x_low}" and "{x_high}". '
-                    "Do not include reasoning, explanations, markdown, or extra text."
-                ),
-                # metadata to help you route/merge results later; not sent to the model
-                "_window_meta": {
-                    "tick_index_range": [start_idx, end_idx],
-                    "x_low": x_low,
-                    "x_high": x_high,
-                },
-            }
-            prompts.append(prompt)
-
-        return prompts
-
-
-
-class PromptCreationSeriesDataPrompt(BaseModel):
-
-    def build_series_prompt_json(
-        self,
-        x_axis: str,
-        x_ticks: List[str],
-        y_axis: str,
-        y_ticks: List[str],
-        series_name: str,
-        series_color: str,
-        series_marker: str,
-        series_line: str
-    ) -> dict:
-        expertise = (
-            "You are an OCR expert in precisely locating data points on scientific graphs using their axis tick marks as reference points."
-        )
-
-        initialization = "A background grid may have been added to improve positional precision. Use it only as a measurement reference; do not count grid lines as data."
-
-        objective = objective = (
-            f'Extract all visible data points belonging to the serie "{series_name}". '
-            f'The target series is identified by: color={series_color}, '
-            f'marker={series_marker} '
-            f'Ignore every other series, line, annotation, label, or graphical element. '
-            f'The x-axis is "{x_axis}" with visible ticks {x_ticks}. '
-            f'The y-axis is "{y_axis}" with visible ticks {y_ticks}.'
-        )
-
-        schema = """SERIES: <series name>
-                POINTS: <count>
-                POINTS:
-                tick_x_low=<value>, tick_x_high=<value>, frac_x=<0.000-1.000>,
-                tick_y_low=<value>, tick_y_high=<value>, frac_y=<0.000-1.000>,
-                """
-        rules = [
-                f'1. Focus exclusively on {series_name} serie .',
-                "2. Ignore all other series and chart elements.",
-                "3. Count visible markers before extracting coordinates.",
-                "5. Identify the two neighboring x-axis ticks for each marker.",
-                "6. Identify the two neighboring y-axis ticks for each marker.",
-                "7. Report frac_x and frac_y with up to 3 decimal places.",
-                "6. If a marker is partially hidden, estimate its coordinates using visible portions."
-                "7. After extracting all points, verify that POINT_COUNT equals the number of entries in POINTS"
-        ]
-
-        return {
-            "expertise": expertise,
-            "initialization": initialization,
-            "definitions": {
-                "POINTS": (
-                    "A data point is represented by the geometric center of a visible "
-                    "marker belonging to the target series."
-                ),
-                "frac_x": (
-                    "Normalized horizontal position of the marker between "
-                    "tick_x_low and tick_x_high. "
-                    "0.000 = exactly at tick_x_low; "
-                    "1.000 = exactly at tick_x_high."
-                ),
-                "frac_y": (
-                    "Normalized vertical position of the marker between  "
-                    "tick_y_low and tick_y_high. "
-                    "0.000 = exactly at tick_y_low; "
-                    "1.000 = exactly at tick_y_high. "
-                ),
-            },
-            "objective": objective,
-            "answer_schema": {
-                "Format": schema,
-                "Rules": "\n".join(f"- {r}" for r in rules),
-            },
-            "conclusion": (
-                f'Return ONLY the requested structure for {series_name} serie.'
-                "Do not include reasoning, explanations, markdown, or extra text."
-            ),
-            }
 
 
 class PromptCreationVerifySeriesPrompt(BaseModel):
