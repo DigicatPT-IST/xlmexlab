@@ -2,7 +2,7 @@ import importlib_resources
 import pytest
 import torch
 
-from zs4procext.llm import ModelLLM
+from xlmexlab.llm import ModelLLM
 
 
 @pytest.mark.skipif(
@@ -12,7 +12,7 @@ def test_ModelLLM():
     name = "facebook/opt-2.7b"
     llm = ModelLLM(model_name=name)
     params_path = str(
-        importlib_resources.files("zs4procext")
+        importlib_resources.files("xlmexlab")
         / "resources"
         / "vllm_default_params.json"
     )

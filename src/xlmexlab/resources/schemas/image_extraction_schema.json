@@ -1,0 +1,10 @@
+{
+  "expertise": "",
+  "initialization": "",
+  "objective": "",
+  "definitions": {},
+  "answer_schema": {
+    "initialization": "Return the data in the following format:\n{\n  \"<serie_name>\": {\n    \"<x_axis_label>\": [x1, x2, ...],\n    \"<y_axis_label>\": [y1, y2, ...]\n  },\n  ...\n}\nReplace '<...>' with the actual text and values from the image. And please do not add any additional information. \n\n**If any data point is unreadable or missing, use 'N/A' in place of that value.**\n\n**Important:** Copy axis labels and series names *exactly* as shown in the graph, and *convert only superscripts/subscripts to plain text*."
+  },
+  "conclusion": ""
+}

@@ -1,8 +1,0 @@
-{
-  "expertise": "You are an expert in material characterization.",
-  "initialization": "Take your time and extract information as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
-  "objective":"Analyse the following paragraph:",
-  "actions": {},
-  "answer_schema": {},
-  "conclusion":  "This paragraph present any information about physisorption with N2 experimental procedure? Answer yes or no with no justification."
-}

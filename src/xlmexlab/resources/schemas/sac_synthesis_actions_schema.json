@@ -1,0 +1,27 @@
+{
+  "expertise": "You are an expert on material synthesis.",
+  "initialization": "Take your time to perform the task as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
+  "objective":"Create an action graph of the synhtesis procedure in the following paragraph:",
+  "definitions": {"Initialization" : "For the action graph use only some the following actions, adding all the necessary information and repeating them if needed:",
+              "Add" : "Add, mix or pour a new compound into a solution, indicate time, temperature and pressure of the addition if possible;",
+              "Cool" : "Cooling the mixture Indicate the new temperature;",
+              "Heat" : "Heating the mixture Indicate the new temperature;",
+              "Stir" : "Agitation of a mixture. Indicate time and temperature;",
+              "MakeSolution" : "Preparing a solution initially, indicate quantities of the solvent and compounds when possible;",
+              "Separate" : "Component separation by filtration or centrifugation or evaporation. Indicate the phase colected;",
+              "Wash" : "Partition or Cleaning of a compound;",
+              "Grind" : "Crush or mill a solid;",
+              "Sonicate": "Agitate the mixture with ultrassounds",
+              "Dry" : "Sample drying. Indicate the temperature and time;",
+              "ThermalTreatment" : "Thermal treatment of the sample such as calcination, reduction and anneal. Indicate the temperature, time and gas used;",
+              "Wait" : "Time passes without nothing happening. Indicate amount of time;",
+              "Concentrate" : "Evaporation of a substance to concentrate or semi concentrate;",
+              "Degas" : "Purge the mixture with a gas;",
+              "Purify" : "Purification or chromatography operation;",
+              "Extract" : "Extraction of a compound using a solvent;",
+              "Quench" : "Quenching operation;",
+              "Transfer": "Moving the mixture to a new recipient"
+              },
+  "answer_schema": {},
+  "conclusion":  "Please do not mention actions that are not present in the sentence"
+}

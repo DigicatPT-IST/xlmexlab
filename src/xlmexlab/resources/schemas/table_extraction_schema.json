@@ -1,0 +1,8 @@
+{
+  "expertise": "You are an expert in material characterization.",
+  "initialization": "Take your time and extract information as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
+  "objective":"Extract the data from table present in the image. Entries in merge cells can be repeated and blank entries should be represented by an empty string.",
+  "definitions": {},
+  "answer_schema": {},
+  "conclusion":  "Whenever possible keep the parameters units on the table headers."
+}

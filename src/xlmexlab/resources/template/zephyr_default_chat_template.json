@@ -1,0 +1,19 @@
+{
+    "input_variables": [
+        "expertise",
+        "initialization",
+        "objective",
+        "context",
+        "definitions",
+        "answer_schema",
+        "conclusion",
+        "examples"
+    ],
+    "input_types": {},
+    "output_parser": null,
+    "partial_variables": {},
+    "template": "# <|system|>{expertise}{initialization}{definitions}</s>\n<|user|>\n{objective}{context}{answer_schema}{conclusion}{examples}</s>\n<|assistant|>",
+    "template_format": "f-string",
+    "validate_template": true,
+    "_type": "prompt"
+}
