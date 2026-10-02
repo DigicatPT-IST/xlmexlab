@@ -25,13 +25,13 @@ PARAM_META: dict[str, dict] = {
     "size_nm": {
         "description": "Nanoparticle diameter or size explicitly measured in the study",
         "unit_hint": "nm",
-        "specific_format": "size_nm | <value> | <unit> | <formulation> | <size_type>",
+        "specific_format": "size_nm | <value> | <unit> | <sample_code> | <size_type>",
         "field_rules": {
             "<value>": "Numeric size exactly as reported (include ranges , intervals and deviations).",
             "<unit>": "Unit exactly as written in text.",
-            "<formulation>": (
-                "Identify the formulation associated to the reported size."
-                "If no formulation name is specified, write 'not extractable'."
+            "<sample_code>": (
+                "Identify the sample code (nanoparticle name) associated to the reported size."
+                "If no sample code name is specified, write 'not extractable'."
             ),
             "<size_type>": (
                 "Type of particle size measurement reported. "
@@ -53,12 +53,12 @@ PARAM_META: dict[str, dict] = {
     "bioconjugation_nature": {
         "description": "Bioconjugation nature",
         "unit_hint": "-",
-        "specific_format": "bioconjugation_nature | <nature> | <formulation>",
+        "specific_format": "bioconjugation_nature | <nature> | <sample_code>",
         "field_rules": {
             "<nature>": "If its refered if the bioconjagation nature is elestrostatic or covalent. ",
-            "<forumulation>": (
-                "Identify the formulation associated to the reported nature."
-                "If no formulation name is specified, write 'not extractable'."
+            "<sample_code>": (
+                "Identify the sample code (nanoparticle name) associated to the reported nature."
+                "If no sample code name is specified, write 'not extractable'."
             ),
     },
         "exclude": [
@@ -77,6 +77,7 @@ PARAM_META: dict[str, dict] = {
         "field_rules": {
             "<value>": "Numeric zeta potential exactly as reported.",
             "<unit>": "Unit exactly as written.",
+            "<sample_code>": "Drug or sample code (nanoparticle name) associated to the zeta value if explicitly written, if not just left it 'unknown'.",
         },
         "exclude": [
             "predicted charge",
@@ -90,7 +91,7 @@ PARAM_META: dict[str, dict] = {
         "specific_format": "pdi | <value>| <methodology>",
         "field_rules": {
             "<value>": "Numeric PDI exactly as reported.",
-            "<methodology>": "Preparation, formulation, or measurement method asssociated to the reported PDI",
+            "<methodology>": "Preparation, sample_code, or measurement method asssociated to the reported PDI",
         },
         "exclude": [],
     },
@@ -102,7 +103,7 @@ PARAM_META: dict[str, dict] = {
         "field_rules": {
             "<value>": "ONLY the numeric EE (Encapsulation Efficiency) exactly as reported (include the standard deviation if available).",
             "<unit>": "Percentage or unit as written.",
-            "<drug_name>": "Drug or formulation if explicitly mentioned.",
+            "<drug_name>": "Drug or sample code (nanoparticle name) if explicitly mentioned.",
         },
         "exclude": [
             "theoretical efficiency",
@@ -112,11 +113,11 @@ PARAM_META: dict[str, dict] = {
     "ic50": {
         "description": "Half-maximal inhibitory concentration",
         "unit_hint": "uM, nM, mg/mL, etc.",
-        "specific_format": "ic50 | <value> | <unit> | <formulation> | <cell_line>",
+        "specific_format": "ic50 | <value> | <unit> | <sample_code> | <cell_line>",
         "field_rules": {
             "<value>": "Numeric IC50 exactly as reported.",
             "<unit>": "Unit exactly as written.",
-            "<formulation>": " Formulation code/ drug name only.",
+            "<sample_code>": " Sample code (nanoparticle name) / drug name only.",
             "<cell_line>": "Cell line used in the experiment if not stated, write 'not extractable'.",
         },
         "exclude": [],
@@ -129,7 +130,7 @@ PARAM_META: dict[str, dict] = {
         "field_rules": {
             "<value>": "Numeric half-life exactly as reported.",
             "<unit>": "Unit in hours or as stated.",
-            "<drug_name>": "Formulation code associated to the nanoparticle.",
+            "<drug_name>": "Sample code (nanoparticle name) associated to the nanoparticle.",
         },
         "exclude": [],
     },
@@ -149,11 +150,11 @@ PARAM_META: dict[str, dict] = {
     "dose_group": {
         "description": "Administered treatment doses from the AUTHORS' OWN experiment only",
         "unit_hint": "as reported",
-        "specific_format": "dose_group | <value> | <unit> | <formulation>",
+        "specific_format": "dose_group | <value> | <unit> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric only, exactly as reported. Do NOT include units or route.",
             "<unit>": "Dose unit exactly as written. Valid formats: mg/kg, μg/kg, mg/animal, μg, mg, g, etc.",
-            "<formulation>": "Formulation actually administered in this study.",
+            "<sample_code>": "Sample code (nanoparticle name) actually administered in this study.",
         },
         "exclude": [
             "theoretical doses",
@@ -163,11 +164,11 @@ PARAM_META: dict[str, dict] = {
     "tumor_size_or_volume": {
         "description": "Tumor size or volume",
         "unit_hint": "mm, cm, mm³, mL or as reported",
-        "specific_format": "tumor_ size_or_volume | <value> | <unit> | <formulation> | <state> | <comparasion>",
+        "specific_format": "tumor_ size_or_volume | <value> | <unit> | <sample_code> | <state> | <comparasion>",
         "field_rules": {
             "<value>": "Numeric reduction exactly as reported.",
             "<unit>": "mm, cm, mm³, mL or as reported.",
-            "<formulation>": "Drug/formulation or control, if not stated left it 'unknown'.",
+            "<sample_code>": "Drug/sample code (nanoparticle name) or control, if not stated left it 'unknown'.",
             "<state>": "Time associated to the volume or if its control, if not stated left it 'unknown'.",
             "<comparison>": "One of: 'absolute', 'increase', 'decrease'. Use 'increase' or 'decrease' when the value represents a relative change. Use 'absolute' when the reported value is the measured tumor size or volume.",
         },
@@ -179,11 +180,11 @@ PARAM_META: dict[str, dict] = {
     "tumor_reduction": {
         "description": "Tumor size reduction/ regression",
         "unit_hint": "%",
-        "specific_format": "tumor_reduction | <value> | <unit> | <formulation>",
+        "specific_format": "tumor_reduction | <value> | <unit> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric reduction exactly as reported.",
             "<unit>": "Percentage.",
-            "<formulation>": "Drug or formulation associated to the reduction if explicitly written, if not just left it 'unknown'.",
+            "<sample_code>": "Drug or sample code (nanoparticle name) associated to the reduction if explicitly written, if not just left it 'unknown'.",
         },
         "exclude": [
             "predicted inhibition",
@@ -205,13 +206,15 @@ PARAM_META: dict[str, dict] = {
     },
 
     "biodistribution": {
-        "description": "Organ accumulation/ biodistribution",
-        "unit_hint": "%ID, %ID/g, etc.",
+        "description": "Organ accumulation/ biodistribution/ off-target sites",
+        "unit_hint": "%ID, %ID/g, %, etc.",
         "specific_format": "biodistribution | <value> | <unit> | <organ>",
         "field_rules": {
             "<value>": "Numeric accumulation exactly as reported.",
             "<unit>": "Unit exactly as written.",
             "<organ>": "Organ explicitly mentioned.",
+            "<drug_name>":  "Drug/sample code (nanoparticle name) name explicitly associated with the reported biodistribution valueif explicitly written, if not just left it 'unknown'.",
+
         },
         "exclude": [
             "qualitative targeting",
@@ -372,43 +375,33 @@ class PromptCreationLipidComposition(BaseModel):
 
         expertise = (
             "You are an expert assistant for identifying lipid components in "
-            "nanoparticle formulations described in scientific text."
+            "nanoparticle sample_codes described in scientific text."
         )
 
         initialization = (""
         )
 
         objective = (
-            " Find all lipid, lipid derivative, sterol, PEG-lipid, "
-            "or ionizable lipid mentioned in the text."
+            "Extract every explicitly mentioned lipid, phospholipid, sterol, "
+    "PEG-lipid, ionizable lipid, or lipid-derived compound."
 
         )
 
 
         schema_lines = [
-            "Task:",
-            "",
-            "Phase 1 – Extraction",
-            "- Extract every lipid, phospholipid, sterol, PEG-lipid, ionizable lipid, or lipid derivative mentioned in the text.",
-            "- Do not exclude any lipid during extraction.",
-            "- Normalize obvious OCR artifacts.",
-            "- Normalize synonymous names when possible.",
-            "Paragraph:",
+        "Task:",
+        "",
+        "- Extract every explicitly named lipid or lipid-derived compound.",
+        "- Preserve each name exactly as written.",
+        "- Do not infer or add compounds that are not explicitly mentioned.",
+        "- Do not extract entities that are only mentioned as sample_codes, nanoparticles, "
+        "- Return each compound once, one per line.",
+        "Paragraph:",
         ]
 
         conclusions = "\n".join([
-            "Phase 2 – Filtering",
-            "Already identified:",
-            *(lipids_found if lipids_found else ["(none)"]),
-            "",
-            "- Remove every lipid that appears in the list above.",
-            "- Return only the remaining lipid names.",
-            "- If none remain, return exactly:",
-            "none",
-            "Phase 3:"
-            "Return ONLY the missing lipid names (or 'none'). No explanations, headers, or comments."
-            "Phase 4:"
-            "Re-check if all components in the list are lipids, and return one lipid per line.",
+        "Return ONLY the extracted lipid names, one per line. "
+        "If no lipid is explicitly mentioned, return exactly: none."
         ])
 
         return {
@@ -425,12 +418,12 @@ class PromptCreationLoadStatus(BaseModel):
     def build_extraction_prompt_json(self, size_entries: list[dict]) -> dict:
         expertise = (
             "You are an expert assistant for determining the loading status of "
-            "nanoparticle formulations described in scientific text."
+            "nanoparticle sample_codes described in scientific text."
         )
         initialization = (
             "Read the paragraph carefully."
         )
-        objective = "Only define each formulation as loaded, unloaded, or unknown using the rules below."
+        objective = "Only define each sample_code as loaded, unloaded, or unknown using the rules below."
 
         entries_str = "\n".join(
             f"- size={e.get('value')} {e.get('unit')}, drug={e.get('drug_name') or '(none)'}"
@@ -443,10 +436,10 @@ class PromptCreationLoadStatus(BaseModel):
             "states the particle is loaded/encapsulated/incorporated with a drug or cargo.",
             "- Use 'unloaded' ONLY if the same sentence (or its immediate clause) explicitly "
             "states the particle is 'blank', 'empty', 'unloaded', or 'control'.",
-            "- Do NOT infer loading status from formulation codes "
+            "- Do NOT infer loading status from sample_code codes "
             "mentioned earlier in the text unless that code or its explicit label is used "
             "in the same sentence as this size value.",
-            "- Do NOT assume a value belongs to a different formulation just because a "
+            "- Do NOT assume a value belongs to a different sample_code just because a "
             "different preparation method (e.g. a different technique) is mentioned.",
             "- If unsure, answer 'unknown'.",
             "Format: <size_value> | <unit> | <status>",
@@ -468,7 +461,7 @@ class PromptCreationLipidRatioUnits(BaseModel):
     def build_extraction_prompt_json(self, ratio_entries: list[dict]) -> dict:
         expertise = (
             "You are an expert assistant for identifying the quantification type "
-            "of lipid composition ratios in nanoparticle formulations."
+            "of lipid composition ratios in nanoparticle sample_codes."
         )
 
         entries_str = "\n".join(
@@ -509,15 +502,15 @@ class PromptCreationFormulationRegistry(BaseModel):
     def build_extraction_prompt_json(self, candidate_codes: list[str]) -> dict:
         expertise = (
             "You are an expert assistant for identifying what nanoparticle "
-            "formulation codes or abbreviations refer to in scientific text."
+            "sample_code codes or abbreviations refer to in scientific text."
         )
         initialization = (
-            "A first-pass scan found these candidate formulation codes/abbreviations "
+            "A first-pass scan found these candidate sample_code codes/abbreviations "
             "in the text below:\n" + ", ".join(candidate_codes)
         )
         objective = (
-            "For each REAL formulation code (i.e. one that genuinely refers to a "
-            "specific nanoparticle/liposome formulation in this text), determine: "
+            "For each REAL sample_code code (i.e. one that genuinely refers to a "
+            "specific nanoparticle/liposome sample_code in this text), determine: "
             "(1) the drug or cargo it contains, if any, and "
             "(2) whether it is explicitly described as loaded or unloaded/blank. "
             "Only use information explicitly stated in the text. Do not infer drug "
@@ -528,12 +521,12 @@ class PromptCreationFormulationRegistry(BaseModel):
         schema_lines = [
             "Format: <code> | <drug_name_or_none> | <loaded/unloaded/unknown>",
             "Rules:",
-            "- If a candidate is NOT actually a formulation identifier (e.g. it's a "
+            "- If a candidate is NOT actually a sample_code identifier (e.g. it's a "
             "method name, unit, or unrelated abbreviation), SKIP it — do not output a line for it.",
             "- Use 'none' for drug_name if no cargo is stated for that code.",
             "- Use 'unknown' for load status only if the text genuinely does not state it.",
-            "- One line per valid formulation code."
-            "-If no valid formulation codes remain after filtering, answer exactly: 'none' (without quotes).",
+            "- One line per valid sample_code code."
+            "-If no valid sample_code codes remain after filtering, answer exactly: 'none' (without quotes).",
         ]
         return {
             "expertise": expertise,
@@ -584,7 +577,7 @@ class PromptCreationLipidRatio(BaseModel):
     def build_extraction_prompt_json(self, lipids_found: list[str]) -> dict:
         expertise = (
             "You are an expert assistant for extracting lipid composition ratios "
-            "from nanoparticle formulation descriptions in scientific text."
+            "from nanoparticle sample_code descriptions in scientific text."
         )
 
         initialization = (
@@ -594,7 +587,7 @@ class PromptCreationLipidRatio(BaseModel):
 
         objective = (
             "For each lipid listed above, extract the numeric ratio or percentage "
-            "explicitly stated in the text for that lipid in the formulation composition. "
+            "explicitly stated in the text for that lipid in the sample_code composition. "
             "Only extract ratios that are explicitly written — do not calculate or infer."
         )
 
@@ -743,8 +736,7 @@ class PromptCreationSeriesDataPrompt(BaseModel):
 
         initialization = (
             "Carefully inspect the entire graph before extracting any values. "
-            "Pay particular attention to the axes, their tick marks, and the grid lines "
-            "added to guide precise point localization. "
+            "Pay particular attention to the axes, their tick marks, and the grid lines added to guide precise point localization. "
             "Use these visual references to estimate the coordinates as accurately as possible."
         )
 
@@ -764,16 +756,17 @@ class PromptCreationSeriesDataPrompt(BaseModel):
         - (x3, y3)"""
 
         rules = [
-            f'1. Start by identifying and following ONLY the "{series_name}" series.',
+            f'1. Start by identifying and following ONLY the "{series_name}" serie.',
             "2. Read the data points from left to right along the x-axis.",
             "3. Determine each x-value by locating the point relative to the visible x-axis tick marks and the added vertical grid lines.",
             "4. Determine each y-value by locating the point relative to the visible y-axis tick marks and the added horizontal grid lines.",
             "5. Use the grid lines as precise geometric guides when determining the position of each point.",
-            "7. Do not infer, invent, or add points that are not visibly present in the graph.",
-            "8. If a coordinate cannot be determined with sufficient confidence, use N/A for that coordinate.",
-            "9. Each extracted point must contain exactly one x-value and one corresponding y-value.",
-            "10. Preserve the actual number of visible data points; do not create additional points based on the line connecting them.",
-            "11. Return points ONLY in the format shown: one '(x, y)' pair per line, prefixed with '-'.",
+            f'6. Do not infer, invent, or add points that are not visibly present for "{series_name}" serie.',
+            "7. If a coordinate cannot be determined with sufficient confidence, use N/A for that coordinate.",
+            "8. Each extracted point must contain exactly one x-value and one corresponding y-value.",
+            "9. Preserve the actual number of visible data points; do not create additional points based on the line connecting them.",
+            "10. Return points ONLY in the format shown: one '(x, y)' pair per line, prefixed with '-'.",
+            f'11. At the end double check the number of points in the list and the number of markers for "{series_name}" serie, it should be the same.'
         ]
 
         return {
@@ -797,7 +790,6 @@ class PromptCreationSeriesDataPrompt(BaseModel):
             "conclusion": (
                 "Return ONLY the requested structure. "
                 "Do not include reasoning, explanations, markdown, or any extra text "
-                "outside the requested POINTS list."
             ),
         }
 

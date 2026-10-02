@@ -23,422 +23,315 @@ from collections import OrderedDict
 from pathlib import Path
 import pandas as pd
 
+from functools import lru_cache
+
 
 
 # 1. CANONICAL DATABASE
+
 CARGO_DB = OrderedDict({
     "alcohol_antagonist": [
-        "Antabuse",
-        "DS",
+        "Disulfiram",
     ],
-
     "alkaloid": [
         "Vinblastine",
         "Vincristine",
         "Vinorelbine",
     ],
-
     "alkylating_agent": [
-        "BCNU",
         "Busulfan",
         "Carmustine",
         "Cyclophosphamide",
         "Melphalan",
         "Temozolomide",
-        "TMZ",
+        "Mitomycin C",
     ],
-
+    "anthracenedione": [
+        "Mitoxantrone",
+    ],
     "anthracycline": [
-        "Adriamycin",
-        "daunorubicin",
-        "DOX",
-        "Doxil",
-        "epirubicin",
-        "Hydroxydaunorubicin",
-        "idarubicin",
+        "Doxorubicin",
+        "Daunorubicin",
+        "Doxorubicin (liposomal formulation)",
+        "Epirubicin",
+        "Idarubicin",
     ],
-
     "anti_malarial": [
         "Chloroquine",
         "Hydroxychloroquine",
     ],
-
     "anti_tumourigenic_cytokine": [
-        "IFN-γ",
-        "IL-2",
+        "Interferon gamma",
+        "Interleukin-2",
     ],
-
     "anti_tumourigenic_cytokine_nucleic_acid": [
-        "IL-12 mRNA",
-        "IL-23 mRNA",
+        "Interleukin-12 mRNA",
+        "Interleukin-23 mRNA",
     ],
-
     "antibody": [
-        "anti-PD-L1",
+        "Anti-Programmed Death-Ligand 1 antibody",
         "Atezolizumab",
         "Avelumab",
-        "Bavencio",
         "Durvalumab",
-        "Herceptin",
-        "Imfinzi",
+        "Trastuzumab",
         "Ipilimumab",
-        "Keytruda",
-        "Nivolumab",
-        "Opdivo",
         "Pembrolizumab",
-        "Tecentriq",
-        "Yervoy",
+        "Nivolumab",
     ],
-
-    "antibody_anthracycline": [
-        "sacituzumab govitecan",
-        "Trodelvy",
+    "antibody_drug_conjugate": [
+        "Sacituzumab Govitecan",
+        "Mertansine (emtansine)",
     ],
-
     "antifungal": [
         "Amphotericin B",
     ],
-
     "antigen": [
-        "neoantigen mRNA",
-        "OVA",
-        "OVA peptide",
-        "Tumor lysate",
+        "Neoantigen-encoding mRNA",
+        "Ovalbumin",
+        "Tumour cell lysate",
     ],
-
     "antigen_nucleic_acid": [
-        "HER2 antigen mRNA",
+        "HER2 antigen-encoding mRNA",
     ],
-
     "antihelmintic_ribosome_inactivating": [
         "Mebendazole",
     ],
-
     "antimetabolite": [
-        "5-Fluorouracil",
-        "5-FU",
+        "Fluorouracil",
         "Cytarabine",
-        "GEM",
-        "MTX",
-        "Pemetrexed",
         "Gemcitabine",
+        "Methotrexate",
+        "Pemetrexed",
+        "Capecitabine",
     ],
-
+    "antitumor_antibiotic": [
+        "Bleomycin",
+    ],
     "antiviral_nucleic_acid": [
         "Acyclovir",
     ],
-
     "beta_blocker": [
         "Propranolol",
     ],
-
     "biologic": [
-        "DM1",
         "Filgrastim",
-        "G-CSF",
-        "Granocyte",
+        "Granulocyte Colony-Stimulating Factor",
         "Lenograstim",
-        "Neulasta",
-        "Neupogen",
         "Pegfilgrastim",
     ],
-
     "biphosphonates": [
-        "Fosamax",
-        "Man-LP@ZOL",
-        "Man-NP@ZOL",
-        "Mannosylated Liposome ZOL",
-        "ZOL",
-        "Zoledronate",
-        "Zometa",
+        "Alendronate",
+        "Mannosylated Liposome Zoledronic Acid",
+        "Mannosylated Nanoparticle Zoledronic Acid",
+        "Zoledronic Acid",
     ],
-
     "boron_neutron_capture_therapy": [
-        "BPA",
-        "BSH",
+        "Boronophenylalanine",
+        "Sodium borocaptate",
     ],
-
     "cdk4_6_inhibitor_autophagy_inhibitor": [
         "Abemaciclib",
-        "Ibrance",
-        "Kisqali",
         "Palbociclib",
         "Ribociclib",
-        "Verzenio",
     ],
-
     "enzyme": [
-        "DNase",
-        "glucose oxidase",
+        "Deoxyribonuclease",
+        "Glucose oxidase",
         "L-asparaginase",
     ],
-
     "enzyme_inhibitor": [
-        "Lynparza",
-        "Talzenna",
+        "Olaparib",
+        "Talazoparib",
     ],
-
     "estrogen_receptor_modulator": [
         "Fulvestrant",
         "Tamoxifen",
     ],
-
     "gnrh_agonist": [
         "Goserelin",
         "Leuprolide",
-        "Lupron",
-        "Zoladex",
     ],
-
     "hypoxic_cytotoxin": [
-        "AQ4N",
+        "Banoxantrone",
         "Tirapazamine",
     ],
-
     "immunoadjuvant": [
-        "cGAMP",
-        "CpG ODN",
-        "DMXAA",
-        "imiquimod",
-        "poly I:C",
-        "R837",
-        "R848",
+        "Cyclic GMP-AMP",
+        "CpG Oligodeoxynucleotide",
+        "Vadimezan (5,6-Dimethylxanthenone-4-acetic acid)",
+        "Imiquimod",
+        "Polyinosinic-polycytidylic acid",
         "Resiquimod",
-        "STING agonist",
-        "TLR9 agonist",
-        "vadimezan",
+        "STING agonist (generic)",
+        "TLR9 agonist (generic)",
+        "Vadimezan (DMXAA)",
     ],
-
     "kinase_inhibitor": [
         "Acalabrutinib",
         "Afatinib",
-        "Alecensa",
         "Alectinib",
-        "Aliqopa",
-        "Alpelisib",
-        "Alunbrig",
-        "Bicalutamide",
-        "Brigatinib",
-        "Brukinsa",
-        "Calquence",
-        "Casodex",
-        "Ceritinib",
         "Copanlisib",
-        "Copiktra",
-        "Crizotinib",
-        "Duvelisib",
-        "Erlotinib",
-        "Gilotrif",
-        "Gleevec",
-        "Ibrutinib",
-        "Imatinib",
-        "Imbruvica",
-        "Lapatinib",
-        "Nexavar",
-        "Osimertinib",
-        "Piqray",
-        "Rap",
-        "Sirolimus",
-        "Sorafenib",
-        "Sunitinib",
-        "Sutent",
-        "Tagrisso",
-        "Tarceva",
-        "Tykerb",
-        "Xalkori",
+        "Alpelisib",
+        "Brigatinib",
+        "Bicalutamide",
         "Zanubrutinib",
-        "Zykadia",
+        "Ceritinib",
+        "Duvelisib",
+        "Crizotinib",
+        "Erlotinib",
+        "Imatinib",
+        "Ibrutinib",
+        "Lapatinib",
+        "Sorafenib",
+        "Osimertinib",
+        "Rapamycin",
+        "Sunitinib",
     ],
-
     "ligand": [
-        "C-peptide-SLN-PTX",
-        "iRGD",
+        "C-peptide paclitaxel solid lipid nanoparticle",
+        "Internalizing RGD peptide",
         "MMP-responsive peptide",
-        "RGD peptide",
+        "Arg-Gly-Asp peptide",
     ],
-
     "metal_compound": [
-        "Gd-DTPA",
+        "Gadolinium Diethylenetriamine Pentaacetic Acid",
     ],
-
     "natural_product": [
-        "BER",
         "Berberine",
-        "clerodol",
-        "Curcumin",
-        "diferuloylmethane",
-        "EGCG",
-        "epigallocatechin gallate",
-        "fagarasterol",
-        "fagarsterol",
-        "farganasterol",
-        "Ginsenoside",
-        "lupenol",
         "Lupeol",
-        "monogynol B",
+        "Curcumin",
+        "Epigallocatechin Gallate",
+        "Ginsenoside",
         "Quercetin",
         "Resveratrol",
-        "tsl-lup",
-        "Betulin"
+        "Betulin",
     ],
-
     "nitroxide_radical": [
-        "4-amino-TEMPO",
-        "TEMPO",
+        "4-Amino-TEMPO",
+        "(2,2,6,6-Tetramethylpiperidin-1-yl)oxyl",
     ],
-
     "non_steroidal_anti_inflammatory": [
-        "Aspirin",
+        "Acetylsalicylic acid",
         "Celecoxib",
         "Indomethacin",
     ],
-
     "nucleic_acid": [
-        "AKT siRNA",
-        "anti-EGFR siRNA",
-        "base editor BRCA1",
-        "BCL-2 siRNA",
-        "Cas12a mRNA",
-        "Cas9 + ESR1 sgRNA",
-        "Cas9 + HER2 sgRNA",
-        "Cas9 + PIK3CA sgRNA",
-        "Cas9 mRNA",
-        "circRNA",
-        "crRNA",
-        "EGFR siRNA",
-        "EZH2 siRNA",
-        "generic siRNA",
-        "gp100 mRNA",
-        "HER2 saRNA",
-        "hTERT circRNA",
-        "let-7",
-        "miR-10b",
-        "miR-145",
-        "miR-155",
-        "miR-182-3p",
-        "miR-200",
-        "miR-21",
-        "miR-34a",
-        "miR-373",
-        "miRNA",
-        "MMP-9 siRNA",
-        "mRNA",
-        "mRNA-4157",
-        "mRNA-4359",
-        "MUC1 mRNA",
-        "MUC1 saRNA",
-        "NY-ESO-1 saRNA",
-        "OX40L mRNA",
-        "p53 mRNA",
-        "PI3K siRNA",
-        "saRNA",
-        "sgRNA",
-        "shRNA",
-        "siRNA",
-        "STAT3 siRNA",
-        "survivin siRNA",
-        "TGF-β trap mRNA",
-        "TRP2 mRNA",
-        "Twist1 siRNA",
-        "VEGF siRNA",
-        "WT1 antigen mRNA",
+        "AKT-targeting siRNA",
+        "Anti-EGFR siRNA",
+        "Base editor targeting BRCA1",
+        "BCL-2-targeting siRNA",
+        "Cas12a nuclease mRNA",
+        "Cas9 + ESR1-targeting sgRNA",
+        "Cas9 + HER2-targeting sgRNA",
+        "Cas9 + PIK3CA-targeting sgRNA",
+        "Cas9 nuclease mRNA",
+        "Circular RNA",
+        "CRISPR RNA",
+        "EGFR-targeting siRNA",
+        "EZH2-targeting siRNA",
+        "Generic siRNA",
+        "Glycoprotein 100 mRNA",
+        "HER2 self-amplifying RNA",
+        "Let-7 microRNA",
+        "MicroRNA-10b",
+        "MicroRNA-145",
+        "MicroRNA-155",
+        "MicroRNA-182-3p",
+        "MicroRNA-200",
+        "MicroRNA-21",
+        "MicroRNA-34a",
+        "MicroRNA-373",
+        "MicroRNA",
+        "MMP-9-targeting siRNA",
+        "Personalized neoantigen mRNA (Moderna)",
+        "Immune checkpoint mRNA (Moderna)",
+        "Mucin-1 mRNA",
+        "Mucin-1 self-amplifying RNA",
+        "NY-ESO-1 self-amplifying RNA",
+        "OX40 Ligand mRNA",
+        "Tumour protein p53 mRNA",
+        "PI3K-targeting siRNA",
+        "Self-Amplifying RNA",
+        "Single Guide RNA",
+        "Short Hairpin RNA",
+        "Small Interfering RNA",
+        "TGF-β trap-encoding mRNA",
+        "Tyrosinase-related protein 2 mRNA",
+        "Wilms Tumour 1 antigen mRNA",
     ],
-
     "peripheral_vasostimulant": [
         "Nitroglycerin",
         "Sildenafil",
     ],
-
     "photosensitizer": [
-        "BPD",
-        "Ce6",
-        "ICG",
+        "Benzoporphyrin Derivative",
+        "Chlorin e6",
+        "Indocyanine Green",
         "Phthalocyanine",
         "Porphyrin",
-        "Verteporfin",
+        "Benzoporphyrin Derivative (BPD)",
     ],
-
     "photosensitizer_enzyme": [
-        "peroxidase",
+        "Peroxidase",
     ],
-
     "platinum_prodrug": [
         "Carboplatin",
         "Cisplatin",
         "Nedaplatin",
         "Oxaliplatin",
     ],
-
     "proteasome_inhibitor": [
         "Bortezomib",
         "Carfilzomib",
-        "Kyprolis",
-        "Velcade",
     ],
-
     "proteinogenic_amino_acid": [
         "L-arginine",
         "L-glutamine",
     ],
-
     "purine_analog": [
         "Cladribine",
         "Clofarabine",
         "Fludarabine",
     ],
-
     "radioactive_element": [
-        "131I",
-        "177Lu",
-        "64Cu",
-        "89Zr",
-        "90Y",
+        "Iodine-131",
+        "Lutetium-177",
+        "Copper-64",
+        "Zirconium-89",
+        "Yttrium-90",
     ],
-
     "reducing_and_complexing_thiol": [
-        "DTT",
+        "Dithiothreitol",
         "Glutathione",
-        "GSH",
         "N-acetylcysteine",
-        "NAC",
     ],
-
     "ribonuclease": [
         "Onconase",
         "Ranpirnase",
     ],
-
     "rna_synthesis_inhibitor": [
         "Actinomycin D",
-        "eribulin",
-        "Halaven",
-        "α-amanitin",
+        "Eribulin",
+        "Alpha-amanitin",
     ],
-
     "taxane": [
-        "Abraxane",
+        "Paclitaxel (albumin-bound)",
         "Cabazitaxel",
-        "nab-paclitaxel",
-        "PTX",
-        "Taxol",
-        "Taxotere",
+        "Paclitaxel",
+        "Docetaxel",
     ],
-
     "topoisomerase_inhibitor": [
         "Camptothecin",
-        "CPT",
         "Etoposide",
         "Irinotecan",
         "Topotecan",
+        "SN-38",
     ],
-
     "tumour_necrosis_factor": [
-        "dulanermin",
-        "hTRAIL",
-        "TNF-α",
-        "TRAIL",
+        "Recombinant human TRAIL",
+        "Dulanermin (recombinant human TRAIL)",
+        "Tumour Necrosis Factor alpha",
     ],
-
 })
 
 cargo_list = sorted({
@@ -457,29 +350,39 @@ def rx(term):
 
 # 3. LITERATURE-SCALE NOMENCLATURE MAP
 cargo_map = OrderedDict({
-rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
+    rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"betulin"): "Betulin",
     rx(r"BN"): "Betulin",
     rx(r"antabuse"): "Disulfiram",
     rx(r"ds"): "Disulfiram",
     rx(r"vinblastine"): "Vinblastine",
     rx(r"vincristine"): "Vincristine",
+    rx(r"navelbine"): "Vincristine",
+    rx(r"vinorelbine"): "Vinorelbine",
     rx(r"vinorelbine"): "Vinorelbine",
     rx(r"bcnu"): "Carmustine",
     rx(r"busulfan"): "Busulfan",
     rx(r"carmustine"): "Carmustine",
     rx(r"cyclophosphamide"): "Cyclophosphamide",
+    rx(r"cyx"): "Cyclophosphamide",
+    rx(r"cpa"): "Cyclophosphamide",
+    rx(r"cytoxan"): "Cyclophosphamide",
     rx(r"melphalan"): "Melphalan",
     rx(r"temozolomide"): "Temozolomide",
     rx(r"tmz"): "Temozolomide",
+    rx(r"temodar"): "Temozolomide",
     rx(r"doxorubicin"): "Doxorubicin",
     rx(r"adriamycin"): "Doxorubicin",
     rx(r"daunorubicin"): "Daunorubicin",
     rx(r"dox"): "Doxorubicin",
     rx(r"doxil"): "Doxorubicin (liposomal formulation)",
     rx(r"epirubicin"): "Epirubicin",
+    rx(r"ellence"): "Epirubicin",
     rx(r"hydroxydaunorubicin"): "Doxorubicin",
+    rx(r"caelyx"): "Doxorubicin",
+    rx(r"myocet"): "Doxorubicin",
     rx(r"idarubicin"): "Idarubicin",
+    rx(r"Idamycin"): "Idarubicin",
     rx(r"chloroquine"): "Chloroquine",
     rx(r"hydroxychloroquine"): "Hydroxychloroquine",
     rx(r"ifn[- ]?γ"): "Interferon gamma",
@@ -511,9 +414,12 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"5[- ]?fluorouracil"): "Fluorouracil",
     rx(r"5[- ]?fu"): "Fluorouracil",
     rx(r"cytarabine"): "Cytarabine",
+    rx(r"Ara-C"): "Cytarabine",
     rx(r"gemcitabine"): "Gemcitabine",
     rx(r"gem"): "Gemcitabine",
     rx(r"mtx"): "Methotrexate",
+    rx(r"dFdC"): "Methotrexate",
+    rx(r"gemzar"): "Methotrexate",
     rx(r"pemetrexed"): "Pemetrexed",
     rx(r"acyclovir"): "Acyclovir",
     rx(r"propranolol"): "Propranolol",
@@ -591,7 +497,7 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"nexavar"): "Sorafenib",
     rx(r"osimertinib"): "Osimertinib",
     rx(r"piqray"): "Alpelisib",
-    rx(r"rap"): "Rapamycin",
+    rx(r"RAP"): "Rapamycin",
     rx(r"sirolimus"): "Rapamycin",
     rx(r"sorafenib"): "Sorafenib",
     rx(r"sunitinib"): "Sunitinib",
@@ -649,7 +555,6 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"mir[- ]?373"): "MicroRNA-373",
     rx(r"mirna"): "MicroRNA",
     rx(r"mmp[- ]?9[-_\s/]+sirna"): "MMP-9-targeting siRNA",
-    rx(r"mrna"): "Messenger RNA",
     rx(r"mrna[- ]?4157"): "Personalized neoantigen mRNA (Moderna)",
     rx(r"mrna[- ]?4359"): "Immune checkpoint mRNA (Moderna)",
     rx(r"muc1[-_\s/]+mrna"): "Mucin-1 mRNA",
@@ -679,9 +584,15 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"verteporfin"): "Benzoporphyrin Derivative (BPD)",
     rx(r"peroxidase"): "Peroxidase",
     rx(r"carboplatin"): "Carboplatin",
+    rx(r"cbdca"): "Carboplatin",
     rx(r"cisplatin"): "Cisplatin",
+    rx(r"cddp"): "Cisplatin",
+    rx(r"ddp"): "Cisplatin",
     rx(r"nedaplatin"): "Nedaplatin",
     rx(r"oxaliplatin"): "Oxaliplatin",
+    rx(r"l-ohp"): "Oxaliplatin",
+    rx(r"oxa"): "Oxaliplatin",
+    rx(r"eloxatin"): "Oxaliplatin",
     rx(r"bortezomib"): "Bortezomib",
     rx(r"carfilzomib"): "Carfilzomib",
     rx(r"kyprolis"): "Carfilzomib",
@@ -696,7 +607,7 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"64cu"): "Copper-64",
     rx(r"89zr"): "Zirconium-89",
     rx(r"90y"): "Yttrium-90",
-    rx(r"dtt"): "Dithiothreitol",
+    rx(r"DTT"): "Dithiothreitol",
     rx(r"glutathione"): "Glutathione",
     rx(r"gsh"): "Glutathione",
     rx(r"n[- ]?acetylcysteine"): "N-acetylcysteine",
@@ -704,7 +615,7 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"onconase"): "Onconase",
     rx(r"ranpirnase"): "Ranpirnase",
     rx(r"actinomycin[-_\s/]+d"): "Actinomycin D",
-    rx(r"eribulin"): "Eribulin mesylate",
+    rx(r"eribulin"): "Eribulin",
     rx(r"halaven"): "Eribulin",
     rx(r"α[- ]?amanitin"): "Alpha-amanitin",
     rx(r"abraxane"): "Paclitaxel (albumin-bound)",
@@ -712,12 +623,19 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"nab[- ]?paclitaxel"): "Paclitaxel (albumin-bound)",
     rx(r"ptx"): "Paclitaxel",
     rx(r"taxol"): "Paclitaxel",
+    rx(r"paclitaxel"): "Paclitaxel",
     rx(r"taxotere"): "Docetaxel",
+    rx(r"docetaxel"): "Docetaxel",
+    rx(r"dtx"): "Docetaxel",
+    rx(r"dtxl"): "Docetaxel",
     rx(r"camptothecin"): "Camptothecin",
-    rx(r"cpt"): "Camptothecin",
     rx(r"etoposide"): "Etoposide",
+    rx(r"vp-16"): "Etoposide",
+    rx(r"vp16"): "Etoposide",
+    rx(r"camptosarn"): "Irinotecan",
     rx(r"irinotecan"): "Irinotecan",
     rx(r"topotecan"): "Topotecan",
+    rx(r"hycamtin"): "Topotecan",
     rx(r"dulanermin"): "Recombinant human TRAIL",
     rx(r"tnf[- ]?α"): "Tumour Necrosis Factor alpha",
     rx(r"trail"): "Dulanermin (recombinant human TRAIL)",
@@ -730,6 +648,19 @@ rx(r"her2[-_\s/]+antigen[-_\s/]+mrna"): "HER2 antigen-encoding mRNA",
     rx(r"farganasterol"): "Lupeol",
     rx(r"lupenol"): "Lupeol",
     rx(r"tsl[- ]?lup"): "Lupeol",
+    rx(r"capecitabine"): "Capecitabine",
+    rx(r"xeloda"): "Capecitabine",
+    rx(r"mitoxantrone"): "Mitoxantrone",
+    rx(r"mitozantrone"): "Mitoxantrone",
+    rx(r"novantrone"): "Mitoxantrone",
+    rx(r"mitomycin[-_\s/]*c"): "Mitomycin C",
+    rx(r"mc"): "Mitomycin C",
+    rx(r"bleomycin"): "Bleomycin",
+    rx(r"blm"): "Bleomycin",
+    rx(r"sn[- ]?38"): "SN-38",
+    rx(r"cpt[- ]?11"): "Irinotecan",
+    rx(r"cpt(?![- ]?\d)"): "Camptothecin",   # substitui o rx(r"cpt"): não apanha CPT-11
+
 })
 
 # 4. COMPILE
@@ -738,8 +669,20 @@ COMPILED_MAP = [
     for pattern, canonical in cargo_map.items()
 ]
 
-# VOCABULARY REGISTRIES
-# These are your keyword lists and regex patterns for direct extraction (no LLM needed)
+#Risky aliases (comparison only on upper case)
+STRICT_ALIASES = {
+    # (alias_regex, canonical)
+    "ds": "Disulfiram", "bn": "Betulin", "rap": "Rapamycin", "ber": "Berberine",
+    "nac": "N-acetylcysteine", "gem": "Gemcitabine", "cpt": "Camptothecin",
+    "ova": "Ovalbumin", "mtx": "Methotrexate", "dox": "Doxorubicin",
+    "ptx": "Paclitaxel", "tmz": "Temozolomide", "zol": "Zoledronic Acid",
+    "dtt": "Dithiothreitol", "gsh": "Glutathione", "ce6": "Chlorin e6",
+    "icg": "Indocyanine Green", "bpd": "Benzoporphyrin Derivative",
+}
+CASE_SENSITIVE_ALIASES = {"gem", "rap", "ova", "ber", "ds", "bn", "nac"}
+
+
+
 
 # type
 ORGANIC_NP_KEYWORDS = [
@@ -764,7 +707,7 @@ INORGANIC_NP_ABBR = ["AuNP", "SPION", "MSN", "GdNP", "Fe3O4", "TiO2", "ZnO", "Ag
 SUBTYPE_MAP = {
     "liposome": {
         "keywords": ["liposome", "liposomal", "liposomes","unilamellar", "multilamellar"],
-        "abbr": ["SUV", "MLV", "LUV"]
+        "abbr": [ "MLV", "LUV"] #"SUV"
     },
 
     "LNP": {
@@ -808,7 +751,7 @@ SUBTYPE_MAP = {
     }
 }
  
-# ── charge ────────────────────────────────────────────────────────────────────
+# ── charge
 POSITIVE_KEYWORDS = [
     "positive zeta",
 ]
@@ -819,24 +762,24 @@ NEUTRAL_KEYWORDS = [
     "neutral", "zwitterionic", "near-neutral", "PEGylated neutral",
 ]
  
-# ── shape ─────────────────────────────────────────────────────────────────────
+# ── shape
 SPHERE_KEYWORDS = ["spherical", "sphere", "spheroid"]
 ROD_KEYWORDS    = ["rod", "rod-shaped", "elongated", "cylindrical"]
 DISK_KEYWORDS   = ["disc", "disk", "discoidal", "flat nanoparticle"]
 OTHERS_KEYWORDS  = ["star", "cube", "plate", "clusters"]
  
-# ── lamellarity ───────────────────────────────────────────────────────────────
+# ── lamellarity 
 UNILAMELLAR_KEYWORDS   = [ "unilamellar", "small unilamellar", "large unilamellar",]
 UNILAMELLAR_ABBR = ["SUV", "SUVs", "LUV"]
 
 MULTILAMELLAR_KEYWORDS = ["multilamellar", "multi-lamellar"]
 MULTILAMELLAR_ABBR = ["MLV", "MLVs"]
  
-# ── lipid composition ─────────────────────────────────────────────────────────
+# ── lipid composition 
 LIPID_KEYWORDS = [
     # structural phospholipids
     "MSPC", "monostearoyl phosphatidylcholine", "SPC", "DPPC", "DSPC", "DOPC", "DOPE", "HSPC", "hydrogenated soy phosphatidylcholine", "DPPE", "DMPC", "POPC", "POPE",
-    "phosphatidylcholine", "sphingomyelin", "span 60", "PS", "SM", "lyso-PC", "lyso-PE",
+    "phosphatidylcholine", "sphingomyelin", "span 60", "SM", "lyso-PC", "lyso-PE",
 
     "span", "twen"
 
@@ -887,7 +830,7 @@ GENERIC_TERMS = {
       "phosphatidylcholine": PHOSPHATIDYLCHOLINES,
 }
  
-# ── stimulus responsive ───────────────────────────────────────────────────────
+# stimulus responsive 
 STIMULUS_MAP = {
     "pH-sensitive":          ["pH-sensitive", "pH-responsive", "acid-responsive", "pH-triggered", "endosomal pH", "tumor acidic pH"],
     "Thermosensitive":       ["thermosensitive", "temperature-responsive", "heat-sensitive", "thermo-responsive", "LTSL"],
@@ -922,35 +865,47 @@ MULTILAYER_KEYWORDS = ["multilayer", "multi-layer", "layer-by-layer", "LbL",
 SURFACE_MODIFIER_KEYWORDS = [
     "hyaluronic acid", "HA coating", "HA-coated", "HA-modified",
     "mannose-modified", "folate-modified", "transferrin-modified",
-    "aptamer-functionalized", "antibody-conjugated", "decorated"
+    "aptamer-functionalized", "antibody-conjugated", "decorated", "HA-"
 ]
 
-# targeting ─────────────────────────────────────────────────────────────────
-ACTIVE_TARGETING_KEYWORDS = [
-    "active targeting", "ligand-targeted", "receptor-targeted",
-    "antibody-conjugated", "aptamer", "folate-targeted", "transferrin",
-    "RGD", "peptide-decorated", "antibody-functionalized",
-    # TNBC-relevant receptors
-    "EGFR-targeted", "anti-EGFR", "HER1", "EGF receptor",
-    "CD44-targeted", "hyaluronic acid-modified", "HA-coated",
-    "TRAIL receptor", "DR5", "αvβ3 integrin",
-    "PDL1-targeted", "anti-PD-L1 conjugated",
-    "nucleolin-targeted", "AS1411",
-]
+# targeting 
 
 PASSIVE_TARGETING_KEYWORDS = [
-    "passive targeting", "passive tumor targeting", "passive tumour targeting", 
+    "passive targeting", "passively targeted", "passively targets", "passively accumulate",
+    "passive tumor targeting", "passive tumour targeting",
     "passive accumulation", "passive delivery",
-    #enhanced permeability and retention
-    "EPR", "enhanced permeability and retention", "enhanced permeability retention", 
-    "EPR effect", "EPR-mediated accumulation", "EPR-mediated targeting"
+    "enhanced permeability and retention", "enhanced permeability retention",
+    "EPR effect", "EPR-mediated", "EPR-based",
+]
+PASSIVE_TARGETING_ABBR = ["EPR"]          # case-sensitive, whole token
+
+ACTIVE_TARGETING_KEYWORDS = [
+    "active targeting", "actively targeted", "actively targets", "actively target",
+    "ligand-targeted", "receptor-targeted", "targeting ligand", "targeting moiety",
+    "targeted liposome", "targeted nanoparticle", "targeted delivery",
 ]
 
+# ligands that are only evidence when attached to the particle
+TARGETING_LIGANDS = (
+    r"folate|folic acid|transferrin|RGD|iRGD|aptamer|AS1411|hyaluronic acid|HA|"
+    r"mannose|galactose|lactoferrin|biotin|peptide|antibody|anti-[A-Za-z0-9-]+|"
+    r"affibody|nanobody|trastuzumab|cetuximab|EGF|CD44|CD47"
+)
+ATTACHMENT = (
+    r"modified|conjugated|functionalized|functionalised|decorated|coated|"
+    r"grafted|labeled|labelled|targeted|-?linked"
+)
+ACTIVE_LIGAND_RX = re.compile(
+    rf"\b(?:{TARGETING_LIGANDS})[-\s]+(?:{ATTACHMENT})\b"
+    rf"|\b(?:{ATTACHMENT})\s+(?:with|by)\s+(?:{TARGETING_LIGANDS})\b",
+    re.I,
+)
 
-# drug loading ──────────────────────────────────────────────────────────────
+
+# drug loading 
 DRUG_LOADING_MAP = {
     "Passive entrapment": {
-        "keywords": ["passive", "passive entrapment", "passive loading", "thin film hydration", "solvent injection"],
+        "keywords": ["passive entrapment", "passive loading", "thin film hydration", "solvent injection"],
         "abbr": []
     },
 
@@ -1034,68 +989,119 @@ MULTIPLE_DOSE_PATTERNS = [
     r"days",
 ]
  
-# route 
-SYSTEMIC_KEYWORDS = ["intravenous", "intraperitoneal", "systemic", "tail vein","intraperitoneally"]
-SYSTEMIC_ABBR = ["i.v.", "IV", "i.p.", "IP"]
+# route and subroutes
+SYSTEMIC_ROUTES = {
+    "intraperitoneal": {
+        "words": ["intraperitoneal", "intraperitoneally", "intra-peritoneal"],
+        "abbr":  ["i.p.", "i.p", "IP", "I.P.", "I.P"],
+    },
+    "oral": {
+        "words": ["oral gavage", "oral administration", "orally administered",
+                  "orally", "by gavage", "per os"],
+        "abbr":  ["p.o.", "PO", "P.O", "P.O."],
+    },
+    "subcutaneous": {   # drug route only, not the tumor model
+        "words": ["subcutaneous injection", "subcutaneously"],
+        "abbr":  ["s.c.", "s.q.", "SC", "S.Q","S.C", "S.Q.", "S.C."],
+    },
+    "intravenous": {
+        "words": ["intravenous", "intravenously", "intra-venous", "tail vein", "tail-vein"],
+        "abbr":  ["i.v.", "i.v", "IV", "I.V", "I.V." ],
+    },
+}
 
-LOCAL_KEYWORDS = ["intratumoral", "local", "direct injection",
-                          "subcutaneous", "intraductal"]
-LOCAL_ABBR = ["i.t.", "IT"]
+LOCAL_ROUTES = {
+    "intratumoral": {
+        "words": [
+            "intratumoral", "intratumorally", "intra-tumoral", "intra-tumorally",
+            "intratumoural", "intratumourally", "intra-tumoural",
+            "intratumural", "instratumural",          # misspellings
+            "peritumoral", "peri-tumoral", "peritumoural",
+        ],
+        "abbr":  ["i.t.", "i.t", "IT", "I.T", "I.T."],
+    },
+    "intratracheal_instillation": {
+        "words": ["intratracheal", "intratracheally", "intra-tracheal",
+                  "tracheal instillation", "intranasal instillation"],
+        "abbr":  [],
+    },
+    "inhalation": {
+        "words": ["inhalation", "inhaled", "aerosol", "nebulized", "nebulised"],
+        "abbr":  [],
+    },
+    "intradermal": {
+        "words": ["intradermal", "intradermally", "intra-dermal"],
+        "abbr":  ["i.d.", "ID", "I.D", "I.D."],
+    },
+    "intramammary": {
+        "words": ["intramammary", "intra-mammary", "intraductal", "intra-ductal"],
+        "abbr":  [],
+    },
+    "percutaneous": {
+        "words": ["percutaneous", "percutaneously", "transdermal",
+                  "dermal application"],
+        "abbr":  [],
+    },
+}
 
-IV_WORDS = ["intravenous", "intravenously", "tail vein",]
-IV_ABBR = ["IV", "i.v."]
+REGIONAL_ROUTES = {   # neither cleanly local nor systemic; 
+    "intra_arterial": {
+        "words": ["intra-arterial", "intraarterial", "intra-arterially",
+                  "hepatic artery infusion"],
+        "abbr":  ["i.a.", "IA"],
+    },
+}
 
-IV_EXCLUDED = ["iv breast cancer", "stage iv breast cancer"]
+# route configuration 
+ROUTE_GROUPS = OrderedDict([
+    ("Systemic", SYSTEMIC_ROUTES),
+    ("Local",    LOCAL_ROUTES),
+    ("Regional", REGIONAL_ROUTES),
+])
+# reverse lookup: "intravenous" -> "Systemic", "intratumoral" -> "Local"...
+SUBROUTE_TO_GROUP = {
+    sub: group
+    for group, routes in ROUTE_GROUPS.items()
+    for sub in routes
+}
+
+#FP
+# lowercase phrases that make an "IV"/"IT"
+ROUTE_FALSE_POSITIVE_CONTEXT = ["stage iv", "grade iv", "iv breast cancer", "type iv", "% ID"]
+
+# short, upper-case abbreviations (IV, IT, ID, IA, IP, PO, SC, SQ) collide with
+# ordinary text, so we only accept them next to administration language
+ROUTE_ADMIN_CONTEXT_RX = re.compile(
+    r"inject|administ|dos(?:e|ed|ing)|mg\s*/\s*kg|[µμu]g|treat|via\b|route|infus",
+    re.I,
+)
+
+# "subcutaneously injected 1×10^6 4T1 cells" is tumor inoculation, not the drug route
+INOCULATION_RX = re.compile(
+    r"\bcells?\b|\d\s*[×x]\s*10\s*\^?\s*\d|cells\s*/\s*(?:mouse|animal)", re.I
+)
+DRUG_CONTEXT_RX = re.compile(
+    r"mg\s*/\s*kg|[µμu]g|nanoparticle|liposom|LNP|formulation|drug|dose|PBS control", re.I
+)
 
 
-IT_WORDS = ["intratumoral", "intra-tumoral"]
-IT_ABBR = ["IT", "i.t."]
 
-#others
-IP_WORDS = ["intraperitoneal"]
-IP_ABBR = ["IP", "i.p."]
-
-INHALATION_WORDS = ["inhalation"]
-INHALATION_ABBR = []
-
-ID_WORDS = ["intradermal", "intradermally"]
-ID_ABBR = ["ID", "i.d."]
-
-IA_WORDS = ["intra-arterial", "intraarterial"]
-IA_ABBR = ["IA", "i.a."]
-
-PERCUTANEOUS_WORDS = ["percutaneous", "transdermal", "transcutaneous"]
-PERCUTANEOUS_ABBR = []
-
-PO_WORDS = ["oral"]
-PO_ABBR = ["PO", "p.o."]
-
-INTRATRACHEAL_INSTILLATION_WORDS = ["intratracheal instillation"]
-INTRATRACHEAL_INSTILLATION_ABBR = []
-
-INTRAMAMMARY_WORDS = ["intramammary"]
-INTRAMAMMARY_ABBR = []
-
-SC_WORDS = ["subcutaneous"]
-SC_ABBR = ["SC", "s.c."]
-
-
-# therapy types ─────────────────────────────────────────────────────────────
+# therapy types
 THERAPY_MAP = {
-    "Chemotherapy":              {"keywords": ["chemotherapy", "chemo", "cytotoxic",
+    "Chemotherapy":              {"keywords": ["chemotherapy", "chemo", "chemoterapeutic", "anticancer drug"
                                   "doxorubicin", "paclitaxel", "docetaxel",
                                   "gemcitabine", "carboplatin", "cisplatin",
                                   "eribulin", "capecitabine", "nab-paclitaxel",
                                   "abraxane", "sacituzumab govitecan"],
-                                  "abbr": ["ADC"]},
+                                  "abbr": ["ADC", "DOX", "PTX"]},
 
     "Gene therapy":              {"keywords": ["gene therapy", "siRNA", "mRNA", "plasmid",
                                   "gene silencing", "gene delivery", "miRNA",
                                   "antisense oligonucleotide", "shRNA"], 
-                                  "abbr": ["ASO","CRISPR", "cas9"]},   
+                                  "abbr": ["ASO","CRISPR", "Cas9", "cas9"]},   
 
     "Immunotherapy":             {"keywords": ["immunotherapy", "immune checkpoint",
-                                  "anti-PD1", "anti-PD-L1",
+                                  "anti-PD1", "anti-PD-1", "anti-PD-L1",
                                   "checkpoint inhibitor", "atezolizumab",
                                   "pembrolizumab", "nivolumab", "ipilimumab",
                                   "tumor microenvironment reprogramming",
@@ -1105,39 +1111,101 @@ THERAPY_MAP = {
                                   "abbr": ["CTLA-4", "TIM-3", "LAG-3", "PD-L1"]},
 
     "Photodynamic therapy":      {"keywords": ["photodynamic",  "photosensitizer",
-                                  "ROS generation", "singlet oxygen",
-                                  "chlorin e6"], 
+                                  "ROS generation", "singlet oxygen", "chlorin e6"], 
                                   "abbr": ["PDT",]}, 
 
     "Photothermal therapy":      {"keywords": ["photothermal", "NIR irradiation",
-                                  "laser irradiation", "indocyanine green",
-                                  "gold nanorod", "copper sulfide"],
-                                  "abbr": ["PTT", "ICG"]},
+                                  "laser irradiation"],
+                                  "abbr": ["PTT"]},
 
     "Radiotherapy":              {"keywords": ["radiotherapy", "radiation therapy",
-                                  "radiosensitization", "radiodynamic"], 
+                                  "radiosensitization", "radiodynamic", "boron neutron capture"], 
                                   "abbr": []},
 
-    "Ultrasound":                {"keywords": ["ultrasound", "sonodynamic", "HIFU",
-                                  "focused ultrasound"], 
+    "Ultrasound":                {"keywords": ["sonodynamic", "focused ultrasound", "ultrasound therapy",
+                                    "ultrasound-triggered", "ultrasound-mediated"],
                                   "abbr": ["HIFU"]},
 
     "Magnetic Hyperthermia":     {"keywords": ["magnetic hyperthermia", "magnetically induced hyperthermia", "magnetic fluid hyperthermia",
-                                "magnetic nanoparticle hyperthermia", "MNP hyperthermia", "magnetic heating", "magnetically induced heating",
+                                "magnetic nanoparticle hyperthermia", "magnetic heating", "magnetically induced heating",
                                 "magnetothermal therapy", "magnetothermal treatment", "magnetothermal"], 
-                                  "abbr": ["MFH"]},    
+                                  "abbr": ["MFH", "MNP hyperthermia"]},    
 
     "Radiofrequency":                {"keywords": ["radiofrequency", "radio frequency"], 
-                                  "abbr": ["RF"]},
-
-    "Others":                {"keywords": ["ultrasound", "sonodynamic", "HIFU",
-                                  "focused ultrasound"], 
-                                  "abbr": ["HIFU"]},   
+                                  "abbr": ["RF"]} 
 }
- 
-# study strategy ────────────────────────────────────────────────────────────
-DIAGNOSIS_KEYWORDS    = ["diagnosis", "diagnostic", "imaging only", 
-                         "detection", "contrast agent"]
+
+# Cargo categories associated to a certain therapy
+
+CHEMO_CATEGORIES = {
+    "alkaloid",
+    "alkylating_agent",
+    "anthracycline",
+    "antimetabolite",
+    "platinum_prodrug",
+    "purine_analog",
+    "taxane",
+    "topoisomerase_inhibitor",
+    "rna_synthesis_inhibitor",
+    "antibody_anthracycline",
+    "hypoxic_cytotoxin",
+}
+# not in therapy categories !!!!!!!!!
+HORMONAL_THERAPY_CATEGORIES = {
+    "estrogen_receptor_modulator",
+    "gnrh_agonist",
+    "antiandrogen",
+}
+#!!!!!!!!!!
+
+IMMUNOTHERAPY_CATEGORIES = {
+    "antibody",
+    "immunoadjuvant",
+    "anti_tumourigenic_cytokine",
+    "anti_tumourigenic_cytokine_nucleic_acid",
+    "antigen",
+    "antigen_nucleic_acid",
+    "tumour_necrosis_factor",
+}
+
+GENE_THERAPY_CATEGORIES = {
+    "nucleic_acid",
+}
+
+PHOTOTHERAPY_CATEGORIES = {
+    "photosensitizer",
+    "photosensitizer_nucleic_acid",
+}
+
+RADIOTHERAPY_CATEGORIES = {
+    "radioactive_element",
+    "boron_neutron_capture_therapy",
+}
+
+PHOTOTHERMAL_THERAPY_CATEGORIES = {} # photothermal-specific cargo categories here if present in CARGO_DB
+
+ULTRASOUND_THERAPY_CATEGORIES = {} # add ultrasound-specific cargo categories here if present in CARGO_DB
+
+MAGNETIC_HYPERTHERMIA_CATEGORIES = {} # add magnetic-hyperthermia-specific cargo categories here if present in CARGO_DB
+
+
+RADIOFREQUENCY_CATEGORIES = {} # add RF-specific cargo categories here if present in CARGO_DB
+
+
+THERAPY_CATEGORIES = {
+    "Chemotherapy": CHEMO_CATEGORIES,
+    "Gene therapy": GENE_THERAPY_CATEGORIES,
+    "Immunotherapy": IMMUNOTHERAPY_CATEGORIES,
+    "Photodynamic therapy": PHOTOTHERAPY_CATEGORIES,
+    "Radiotherapy": RADIOTHERAPY_CATEGORIES,
+    "Photothermal therapy": PHOTOTHERMAL_THERAPY_CATEGORIES,
+    "Ultrasound": ULTRASOUND_THERAPY_CATEGORIES,
+    "Magnetic Hyperthermia": MAGNETIC_HYPERTHERMIA_CATEGORIES,
+    "Radiofrequency": RADIOFREQUENCY_CATEGORIES,
+}
+
+# study strategy 
+DIAGNOSIS_KEYWORDS    = ["diagnosis", "diagnostic", "imaging only", "contrast agent"]
 
 THERAPY_KEYWORDS    = ["therapy", "treatment", "therapeutic", "therapeutics", "drug delivery",
                     "drug release"]
@@ -1146,7 +1214,7 @@ THERANOSTICS_KEYWORDS = ["theranostic", "theragnosis",
                           "combined imaging and therapy", "dual-function",
                           "image-guided therapy"]
  
-# tumor model ───────────────────────────────────────────────────────────────
+# tumor model 
 INVIVO_GENERIC_KEYWORDS = [
     "tumor volume", "tumor growth", "tumor regression",
     "PBS control", "treatment group", "body weight loss",
@@ -1162,11 +1230,37 @@ INVITRO_GENERIC_KEYWORDS = [
 
 
 XENOGRAFT_KEYWORDS    = ["xenograft", "human tumor", "human cell line",
-                          "human cancer cells", "xenografts", "cell into", "cells in BALB/c nude mice", "in SCID mice" ] # MDA-MB-231-BrM brain metastasis model in SCID mice
+                          "human cancer cells", "xenografts", "cell into", "BALB/c nude mice", "SCID mice" ] # MDA-MB-231-BrM brain metastasis model in SCID mice
 ALLOGRAFT_KEYWORDS    = ["allograft", "syngeneic", "syngeneic model",
                           "murine tumor","4t1", "ct26", "b16", "llc", "e0771", "BALB/c mice"] # duvida em BALB/c mice
-ORTHOTOPIC_KEYWORDS   = ["orthotopic"]
-HETEROTOPIC_KEYWORDS  = ["heterotopic", "subcutaneous", "flank"]
+ORTHOTOPIC_KEYWORDS = [
+    "orthotopic", "orthotopically",
+    "mammary fat pad", "mammary fatpad", "mammary pad",
+    "fourth mammary", "4th mammary", "inguinal mammary",
+    "mammary gland injection", "in situ implantation",
+]
+ORTHOTOPIC_ABBR = ["MFP", "MFPs"]
+
+HETEROTOPIC_KEYWORDS = [
+    "heterotopic", "heterotopically", "ectopic",
+
+    # tumor/model described as subcutaneous
+    "subcutaneous tumor", "subcutaneous tumour",
+    "subcutaneous xenograft", "subcutaneous model",
+    "subcutaneous implantation", "subcutaneously implanted",
+    "subcutaneously inoculated", "subcutaneously transplanted",
+
+    # flank always with context
+    "right flank", "left flank", "bilateral flank", "both flanks",
+    "dorsal flank", "lateral flank", "hind flank", "rear flank",
+    "flank region", "flank area", "flank tumor", "flank tumour",
+    "flank xenograft", "flank model", "flank injection",
+    "in the flank", "into the flank", "on the flank", "of the flank",
+
+    # other typical sites
+    "dorsal side", "back of the mice", "dorsal region",
+]
+HETEROTOPIC_ABBR = ["s.c."] 
 
 CHEMICALLY_INDUCED_WORDS = [
     "chemically induced", "chemically-induced", "chemical carcinogenesis",
@@ -1177,21 +1271,25 @@ VIRUS_INDUCED_WORDS = [
     "virus induced", "virus-induced", "viral-induced", "viral carcinogenesis",
     "oncogenic virus", "viral tumor model", "viral tumour model"]
  
-# immune status ─────────────────────────────────────────────────────────────
+# immune status 
 IMMUNOCOMPROMISED_KEYWORDS = [
     "nude mice", "athymic", "immunodeficient",
-    "immunocompromised", "NCr nude",
+    "immunocompromised", "NCr nude", "no T cell", "BALB/c nude"
 ]
 IMMUNOCOMPROMISED_ABBR = [
-     "SCID", "NOD/SCID", "NSG", "RAG",
+     "SCID", "NOD/SCID", "NSG", "RAG", "MDA-MB-231", "MCF-7",
 ]
 
 IMMUNOCOMPETENT_KEYWORDS = [
-    "BALB/c", "C57BL/6", "immunocompetent", "syngeneic", "intact immune",
-    "FVB/N", "immune",
+    "BALB/c mice", "C57BL/6", "immunocompetent", "syngeneic", "intact immune",
+    "FVB/N", 
+]
+
+IMMUNOCOMPETENT_ABBR = [
+    "4T1", "E0771", 
 ]
  
-# cancer type ───────────────────────────────────────────────────────────────
+# cancer type 
 CANCER_TYPE_MAP = {
     "Breast":   ["breast", "4T1", "MCF-7", "MDA-MB", "T47D", "BT-474", "SKBR3",
                   "ZR-75", "SUM149", "SUM159", "HCC1806", "HCC1937", "HCC70",
@@ -1229,7 +1327,7 @@ BREAST_SUBTYPE_MAP = {
                                 "brain metastasis", "lung metastasis"],
 }
  
-# imaging modalities ────────────────────────────────────────────────────────
+# imaging modalities 
 IMAGING_MAP = {
     "MRI": {
         "abbrs": ["MRI", "T1", "T2", "T1-weighted", "T2-weighted", "Gd.DOTA.DSA"],
@@ -1334,6 +1432,8 @@ ORGAN_KEYWORDS = [
     "nose", "nasal",
     "sinus",
     "pharynx", "larynx", "trachea", "bronchus", "bronchial",
+
+    "tumor", "tumour"
 ]
 
  
@@ -1410,6 +1510,11 @@ particl(?:e|es)\s+size
 |Dh
 |D_h
 |Dₕ
+|PS
+|paricles
+|structure
+|liposome(?:s)?
+|nanoparticle(?:s)?
 )
 """
 
@@ -1425,6 +1530,40 @@ FORMULATION_CODE_STOPLIST = {
     "DLS", "PDI", "REV", "TEM", "SEM", "EE", "PBS", "NaCl", "DMSO",
 }
 
+
+DEFAULT_SUFFIXES = ("ly", "ally", "s", "es", "ed", "ion")
+
+
+@lru_cache(maxsize=None)
+def _compile_word_rx(keyword: str, suffixes: Tuple[str, ...]) -> "re.Pattern":
+    kw = re.escape(keyword.strip())
+    kw = kw.replace(r"\ ", r"[-\s]+")            # "oral gavage" also matches "oral-gavage"
+    suffix_part = "|".join(re.escape(s) for s in sorted(suffixes, key=len, reverse=True))
+    suffix_rx = f"(?:{suffix_part})?" if suffixes else ""
+    return re.compile(
+        r"(?<![A-Za-z0-9])" + kw + suffix_rx + r"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+
+
+def _word_sufix_keyword_match(
+    text: str,
+    keywords: List[str],
+    suffixes: Tuple[str, ...] = DEFAULT_SUFFIXES,
+) -> bool:
+    """True if any keyword occurs as a whole word (optionally with an allowed suffix)."""
+    for kw in keywords:
+        if _compile_word_rx(kw, suffixes).search(text):
+            print(f'Match keyword:{kw}')
+            return True
+    return False
+
+SENTENCE_SPLIT_RX = re.compile(r"(?<=[A-Za-z0-9]{3}[.!?])\s+(?=[A-Z])")
+
+def _split_sentences(text: str) -> List[str]:
+    return [s.strip() for s in SENTENCE_SPLIT_RX.split(text) if s.strip()]
+
+
 def lookup_cargo_category(cargo_name: str, cargo_db: dict = CARGO_DB) -> str | None:
     """Deterministic lookup: which CARGO_DB category does this drug belong to?"""
     name_norm = cargo_name.strip().lower()
@@ -1436,13 +1575,12 @@ def lookup_cargo_category(cargo_name: str, cargo_db: dict = CARGO_DB) -> str | N
 
 
 
-
-
 # HELPER FUNCTIONS
 def _match_abbreviation(text: str, abbrs: List[str]) -> bool:
     for a in abbrs:
         pattern = r"(?<![A-Za-z0-9])" + re.escape(a) + r"(?![A-Za-z0-9])"
         if re.search(pattern, text):
+            print(f'Match abbreviation:{a}')
             return True
     return False
 
@@ -1640,14 +1778,7 @@ class NanoparticleExtractor(BaseModel):
             return "Unilamellar (SUV/LUV)"
         return None
     
-    def _extract_charge_group(self, text: str) -> Optional[str]:
-        
-        if _first_keyword_match(text, POSITIVE_KEYWORDS):
-            return "positive"
-        if _first_keyword_match(text, NEGATIVE_KEYWORDS):
-            return "negative"
-        if _first_keyword_match(text, NEUTRAL_KEYWORDS):
-            return "neutral"
+    def _extract_charge_group(self) -> Optional[str]:
         
         return None
      
@@ -1710,8 +1841,15 @@ class NanoparticleExtractor(BaseModel):
         return None
 
     def _extract_targeting_type(self, text: str) -> Optional[str]:
-        if _first_keyword_match(text, ACTIVE_TARGETING_KEYWORDS):
+        active = ( _word_sufix_keyword_match(text, ACTIVE_TARGETING_KEYWORDS)or bool(ACTIVE_LIGAND_RX.search(text)))
+        passive = _abr_first_keyword_match(text, PASSIVE_TARGETING_KEYWORDS, PASSIVE_TARGETING_ABBR)
+
+        if active and passive:
+            return "active and passive"
+        if active:
             return "active"
+        if passive:
+            return "passive"
         return None
 
     def _extract_lipid_composition(self, text: str) -> Optional[List[str]]:
@@ -1786,21 +1924,53 @@ class NanoparticleExtractor(BaseModel):
             return None
     
     def _extract_therapies(self, text: str):
-        """Returns (therapy_a, therapy_b, therapy_c, combined_grouped)."""
-        all_therapies = _all_map_matches(text, THERAPY_MAP)
-        therapy_a = all_therapies[0] if len(all_therapies) > 0 else None
-        therapy_b = all_therapies[1] if len(all_therapies) > 1 else None
-        therapy_c = all_therapies[2] if len(all_therapies) > 2 else None
-        if therapy_b: # or _first_keyword_match(text, "combined therapy"):
-            combined  = "Combination therapy" 
-        elif therapy_a == "Combination therapy":
-            combined  = "Combination therapy"
-        elif therapy_a:
-            combined = "Monotherapy" 
-        else: 
-            combined = None
-        return therapy_a, therapy_b, therapy_c, combined
+        therapies = set()
 
+        # 1. Existing therapy detection from THERAPY_MAP
+        all_therapies = _all_map_matches(text, THERAPY_MAP)
+
+        for therapy in all_therapies:
+            therapies.add(therapy)
+
+        # 2. Additional detection based on cargo categories
+        cargo_categories = self.extract_cargo_categories(text) or []
+
+        for category in cargo_categories:
+            for therapy, categories in THERAPY_CATEGORIES.items():
+                if category in categories:
+                    therapies.add(therapy)
+
+        # 3. Keep the original output structure
+        therapies = list(therapies)
+
+        therapy_a = therapies[0] if len(therapies) > 0 else None
+        therapy_b = therapies[1] if len(therapies) > 1 else None
+        therapy_c = therapies[2] if len(therapies) > 2 else None
+
+        if therapy_b:
+            combined = "Combination therapy"
+        elif therapy_a:
+            combined = "Monotherapy"
+        else:
+            combined = None
+
+        return therapy_a, therapy_b, therapy_c, combined
+    
+    def _extract_study_strategy(self, text: str) -> Optional[str]:
+        if _word_sufix_keyword_match(text, THERANOSTICS_KEYWORDS):
+            return "Theranostics"
+        diag = _word_sufix_keyword_match(text, DIAGNOSIS_KEYWORDS)
+        
+        therapy_a, therapy_b, therapy_c, combined = self._extract_therapies(text)
+        ther = _word_sufix_keyword_match(text, THERAPY_KEYWORDS) or therapy_a is not None
+        if diag and ther:
+            return "Theranostics"
+        if diag:
+            return "Diagnosis"
+        if ther:
+            return "Therapy"
+        return None
+    
     def _extract_study_strategy(self, text: str) -> Optional[str]:
         if _first_keyword_match(text, THERANOSTICS_KEYWORDS):
             return "Theranostics"
@@ -1810,94 +1980,85 @@ class NanoparticleExtractor(BaseModel):
             return "Therapy"
         return None
         
+    def _route_sentence_is_valid(self, sentence: str, rules: dict) -> bool:
+        """Guards applied AFTER _abr_first_keyword_match already said True."""
+        words_hit = _word_sufix_keyword_match(sentence, rules["words"])
 
-    def _extract_route(self, text: str) -> Optional[list[str]]:
-        rules = {
-            "Local": {
-                "keywords": LOCAL_KEYWORDS,
-                "abbr": LOCAL_ABBR
-            },
-            "Systemic": {
-                "keywords": SYSTEMIC_KEYWORDS,
-                "abbr": SYSTEMIC_ABBR
-            }
-        }
+        if not words_hit:
+            # matched only through an abbreviation
+            dotted = [a for a in rules["abbr"] if "." in a]
+            dotted_hit = bool(dotted) and _match_abbreviation(sentence, dotted)
+
+            if not dotted_hit:  # risky undotted abbr: IV, IT, ID, IA, IP, PO, SC, SQ
+                if _is_excluded(sentence, ROUTE_FALSE_POSITIVE_CONTEXT):
+                    return False                       # "stage IV breast cancer"
+                if not ROUTE_ADMIN_CONTEXT_RX.search(sentence):
+                    return False                       # "the IT department", "sample ID"
+
+        # tumour inoculation is not the treatment route
+        if INOCULATION_RX.search(sentence) and not DRUG_CONTEXT_RX.search(sentence):
+            return False
+
+        return True
 
 
-        matches = _find_matches_with_positions(text, rules)
-        matches.sort(key=lambda x: x[0])
+    def _find_subroutes(self, text: str) -> List[str]:
+        """Subroutes in order of appearance (sentence by sentence), deduplicated."""
+        found = []
+        false_positives = []
 
-        filtered = [
-            (pos, label)
-            for (pos, label) in matches
-            if not (
-                label == "Systemic"
-                and _is_excluded(text, IV_EXCLUDED)
-            )
-        ]
-        return [label for _, label in filtered]
+        for sentence in _split_sentences(text):
+            for group, routes in ROUTE_GROUPS.items():
+                for sub, rules in routes.items():
+                    if sub in found:
+                        continue
+
+                    # Check keyword match
+                    keyword_match = _word_sufix_keyword_match(
+                        sentence,
+                        rules["words"]
+                    )
+
+                    # Check abbreviation match
+                    abbreviation_match = _match_abbreviation(
+                        sentence,
+                        rules["abbr"]
+                    )
+
+                    # Example: "% ID" should be considered a false positive
+                    if abbreviation_match:
+                        for abbr in rules["abbr"]:
+                            pattern = r"(?<![A-Za-z0-9])" + re.escape(abbr) + r"(?![A-Za-z0-9])"
+                            match = re.search(pattern, sentence)
+
+                            if match:
+                                prefix = sentence[:match.start()].rstrip()
+
+                                if prefix.endswith("%"):
+                                    false_positives.append(
+                                        (sub, abbr, sentence)
+                                    )
+                                    print(
+                                        f'False positive: {abbr} '
+                                        f'for subroute {sub}: {sentence}')
+                                    abbreviation_match = False
+                                break
+
+                    if keyword_match or abbreviation_match:
+                        if self._route_sentence_is_valid(sentence, rules):
+                            found.append(sub)
+
+        return found
 
     def _extract_route_subtype(self, text: str) -> Optional[list[str]]:
-        rules = {
-            "Intravenous": {
-                "keywords": IV_WORDS,
-                "abbr": IV_ABBR
-            },
-            "Intratumoral": {
-                "keywords": IT_WORDS,
-                "abbr": IT_ABBR
-            },
-            "Other": {
-                "keywords": IP_WORDS,
-                "abbr": IP_ABBR
-            },
-            "Other": {
-                "keywords": INHALATION_WORDS,
-                "abbr": INHALATION_ABBR
-            },
-            "Other": {
-                "keywords": ID_WORDS,
-                "abbr": ID_ABBR
-            },
-            "Other": {
-                "keywords": IA_WORDS,
-                "abbr": IA_ABBR
-            },
-            "Other": {
-                "keywords": PERCUTANEOUS_WORDS,
-                "abbr": PERCUTANEOUS_ABBR
-            },
-            "Other": {
-                "keywords": PO_WORDS,
-                "abbr": PO_ABBR
-            },
-            "Other": {
-                "keywords": INTRATRACHEAL_INSTILLATION_WORDS,
-                "abbr": INTRATRACHEAL_INSTILLATION_ABBR
-            },
-            "Other": {
-                "keywords": INTRAMAMMARY_WORDS,
-                "abbr": INTRAMAMMARY_ABBR
-            },
-            "Other": {
-                "keywords": SC_WORDS,
-                "abbr": SC_ABBR
-            }
-        }
+        subroutes = self._find_subroutes(text)
+        return subroutes or None
 
-        matches = _find_matches_with_positions(text, rules)
-        matches.sort(key=lambda x: x[0])
-
-        filtered = [
-            (pos, label)
-            for (pos, label) in matches
-            if not (
-                label == "Intravenous"
-                and _is_excluded(text, IV_EXCLUDED)
-            )
-        ]
-
-        return [label for _, label in filtered]
+    def _extract_route(self, text: str) -> Optional[list[str]]:
+        subroutes = self._find_subroutes(text)
+        groups = [SUBROUTE_TO_GROUP[s] for s in subroutes]   # which dict it came from
+        groups = list(dict.fromkeys(groups))
+        return groups or None
 
     def _extract_dose(self, text: str) -> Optional[bool]:
         """
@@ -1945,10 +2106,10 @@ class NanoparticleExtractor(BaseModel):
     # BIOLOGICAL CONTEXT
 
     def _extract_tumor_model(self, text: str) -> Optional[str]:
-        is_xeno  = _first_keyword_match(text, XENOGRAFT_KEYWORDS)
+        is_xeno  = _map_keywords(text, XENOGRAFT_KEYWORDS)
         is_allo  = _first_keyword_match(text, ALLOGRAFT_KEYWORDS)
-        is_ortho = _first_keyword_match(text, ORTHOTOPIC_KEYWORDS)
-        is_heter = _first_keyword_match(text, HETEROTOPIC_KEYWORDS)
+        is_ortho = _abr_first_keyword_match(text, ORTHOTOPIC_KEYWORDS, ORTHOTOPIC_ABBR)
+        is_heter = _abr_first_keyword_match(text, HETEROTOPIC_KEYWORDS, HETEROTOPIC_ABBR)
         base = "Xenograft" if is_xeno else ("Allograft" if is_allo else None)
         loc  = "Orthotopic" if is_ortho else ("Heterotopic" if is_heter else None)
         if base and loc:
@@ -2044,9 +2205,9 @@ class NanoparticleExtractor(BaseModel):
             if re.search(pattern, text, re.IGNORECASE):
                 return True
 
-        pattern = r"%\s*ID(?:\s*/\s*g)?"
+        pattern_id = r"%\s*ID(?:\s*/\s*g)?"
 
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(pattern_id, text, re.IGNORECASE):
             return True
 
         return False
@@ -2140,7 +2301,7 @@ class NanoparticleExtractor(BaseModel):
             type                    = self._extract_type(text),
             subtype                 = self._extract_subtype(text),
             size_nm                 = self._extract_size(text),
-            charge_group            = self._extract_charge_group(text),
+            charge_group            = None, #self._extract_charge_group(text),
             shape                   = self._extract_shape(text),
             lamellarity             = self._extract_lamellarity(text),
             zeta_potential_mv       = self._extract_zeta_potential(text),

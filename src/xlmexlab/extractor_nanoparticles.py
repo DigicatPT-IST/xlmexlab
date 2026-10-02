@@ -82,7 +82,7 @@ class NanoparticlesExtractorParagraph(BaseModel):
         final_result = {}
 
         for param_key in active_params:
-            print(f"\n  [EXTRACTOR.extract_text_info] === Processing param: '{param_key}' ===")
+            print(f'EXTRACTOR.extract_text_info] Processing param: {param_key}')
 
             single_flag = {k: (k == param_key) for k in self._extracted_flags}
 

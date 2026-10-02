@@ -213,19 +213,19 @@ PARAM_META = {
 
     "size_nm": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation", "size_type", 
+            "parameter_name", "value", "unit", "sample_code", "size_type", 
         ],
     },
 
     "zeta_potential_mv": {
         "fields": [
-            "parameter_name", "value", "unit", "condition"
+            "parameter_name", "value", "unit", "sample_code"
         ],
     },
 
     "bioconjugation_nature": {
         "fields": [
-            "bioconjugation_nature", "nature", "formulation"
+            "bioconjugation_nature", "nature", "sample_code"
         ],
     },
 
@@ -237,13 +237,13 @@ PARAM_META = {
 
     "encapsulation_efficiency_pct": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation"
+            "parameter_name", "value", "unit", "sample_code"
         ],
     },
 
     "ic50": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation", "cell_line"
+            "parameter_name", "value", "unit", "sample_code", "cell_line"
         ],
     },
 
@@ -261,19 +261,19 @@ PARAM_META = {
 
     "dose_group": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation", "schedule",
+            "parameter_name", "value", "unit", "sample_code", "schedule",
         ],
     },
 
     "tumor_reduction": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation",
+            "parameter_name", "value", "unit", "sample_code",
         ],
     },
 
     "tumor_size_or_volume": {
         "fields": [
-            "parameter_name", "value", "unit", "formulation", "state", "comparasion",
+            "parameter_name", "value", "unit", "sample_code", "state", "comparasion",
         ],
     },
 
@@ -285,7 +285,7 @@ PARAM_META = {
 
     "biodistribution": {
         "fields": [
-            "parameter_name", "value", "unit", "condition"
+            "parameter_name", "value", "unit", "condition", "drug_name"
         ],
     },
 }
@@ -417,6 +417,8 @@ class ParserNanoparticle(BaseModel):
                 "organ": organ,
                 "percent": percent,
                 "unit": item.get("unit"),
+                "drug_name": item.get("drug_namre"),
+
             })
         processed = sorted(
             processed,
@@ -465,7 +467,7 @@ class ParserNanoparticle(BaseModel):
         processed = []
         for item in entries:
 
-            cond = item.get("formulation") or ""
+            cond = item.get("sample_code") or ""
             #cargo = self.extract_cargos(cond) or "unknown"
 
             processed.append({
@@ -532,7 +534,7 @@ class ParserNanoparticle(BaseModel):
             processed.append({
                 "value": value,
                 "unit": unit,
-                "drug_name": item.get("drug_name"),
+                "drug_name": item.get("sample_code"),
             })
 
         return processed
@@ -599,6 +601,9 @@ class ParserNanoparticle(BaseModel):
             )
 
             T_and_F_list["charge_group"] = charge
+
+        if not T_and_F_list.get("dose_group"):
+                T_and_F_list["no_days_dosing_grouped"] = None
 
         return T_and_F_list
     
