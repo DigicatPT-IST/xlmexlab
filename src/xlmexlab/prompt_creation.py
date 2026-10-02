@@ -501,22 +501,19 @@ class PromptCreationFormulationRegistry(BaseModel):
 
     def build_extraction_prompt_json(self, candidate_codes: list[str]) -> dict:
         expertise = (
-            "You are an expert assistant for identifying what nanoparticle "
-            "sample_code codes or abbreviations refer to in scientific text."
+            "You are an expert assistant for identifying the correct "
+            "sample codes (nanoparticles names)."
         )
         initialization = (
-            "A first-pass scan found these candidate sample_code codes/abbreviations "
+            "A first-pass scan found these candidate sample codes "
             "in the text below:\n" + ", ".join(candidate_codes)
         )
         objective = (
-            "For each REAL sample_code code (i.e. one that genuinely refers to a "
-            "specific nanoparticle/liposome sample_code in this text), determine: "
-            "(1) the drug or cargo it contains, if any, and "
+            "For each REAL sample code (i.e. one that genuinely refers to a "
+            "specific nanoparticle/liposome sample code in this text), determine: "
+            "(1) the cargo (therapeutic molecule) it contains, if any, and "
             "(2) whether it is explicitly described as loaded or unloaded/blank. "
-            "Only use information explicitly stated in the text. Do not infer drug "
-            "identity or load status from the code's letters/name alone "
-            "(e.g. do not assume 'BLK' means blank just because of the abbreviation; "
-            "only conclude this if the text itself states it)."
+            "Only use information explicitly stated in the text."
         )
         schema_lines = [
             "Format: <code> | <drug_name_or_none> | <loaded/unloaded/unknown>",
@@ -525,8 +522,8 @@ class PromptCreationFormulationRegistry(BaseModel):
             "method name, unit, or unrelated abbreviation), SKIP it — do not output a line for it.",
             "- Use 'none' for drug_name if no cargo is stated for that code.",
             "- Use 'unknown' for load status only if the text genuinely does not state it.",
-            "- One line per valid sample_code code."
-            "-If no valid sample_code codes remain after filtering, answer exactly: 'none' (without quotes).",
+            "- One line per valid sample code."
+            "-If no valid sample code remain after filtering, answer exactly: 'none' (without quotes).",
         ]
         return {
             "expertise": expertise,
