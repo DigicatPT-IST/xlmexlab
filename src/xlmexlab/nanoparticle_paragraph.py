@@ -1230,7 +1230,7 @@ INVITRO_GENERIC_KEYWORDS = [
 
 
 XENOGRAFT_KEYWORDS    = ["xenograft", "human tumor", "human cell line",
-                          "human cancer cells", "xenografts", "cell into", "BALB/c nude mice", "SCID mice" ] # MDA-MB-231-BrM brain metastasis model in SCID mice
+                          "human cancer cells", "xenografts", "cell into", "BALB/c nude mice", "SCID mice"] # MDA-MB-231-BrM brain metastasis model in SCID mice
 ALLOGRAFT_KEYWORDS    = ["allograft", "syngeneic", "syngeneic model",
                           "murine tumor","4t1", "ct26", "b16", "llc", "e0771", "BALB/c mice"] # duvida em BALB/c mice
 ORTHOTOPIC_KEYWORDS = [
@@ -2106,7 +2106,7 @@ class NanoparticleExtractor(BaseModel):
     # BIOLOGICAL CONTEXT
 
     def _extract_tumor_model(self, text: str) -> Optional[str]:
-        is_xeno  = _map_keywords(text, XENOGRAFT_KEYWORDS)
+        is_xeno  = _first_keyword_match(text, XENOGRAFT_KEYWORDS)
         is_allo  = _first_keyword_match(text, ALLOGRAFT_KEYWORDS)
         is_ortho = _abr_first_keyword_match(text, ORTHOTOPIC_KEYWORDS, ORTHOTOPIC_ABBR)
         is_heter = _abr_first_keyword_match(text, HETEROTOPIC_KEYWORDS, HETEROTOPIC_ABBR)
@@ -2126,7 +2126,7 @@ class NanoparticleExtractor(BaseModel):
          #       return "In vivo generic keyword"
         #else: 
         #    if _first_keyword_match(text, INVITRO_GENERIC_KEYWORDS):
-                return "In vitro generic keyword"
+                #return "In vitro generic keyword"
 
     def _extract_immune_status(self, text: str) -> Optional[str]:
         if _abr_first_keyword_match(text, IMMUNOCOMPROMISED_KEYWORDS, IMMUNOCOMPROMISED_ABBR):
