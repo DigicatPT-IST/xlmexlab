@@ -1,8 +1,0 @@
-{
-  "expertise": "You are an expert in catalyst design",
-  "initialization": "Take your time and extract information as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
-  "objective":"The following paragraph, describe more than one preparation procedure? ",
-  "actions": {"Initialization" : "Consider the existence of more than one preparation procedure if more than one sample is preapared with different preparation actions or reactants between them. If only the preparation conditions like temperature, time and quantities change, consider it all the same preparation procedure."},
-  "answer_schema": {},
-  "conclusion":  "Give your answer as yes or no without justification."
-}

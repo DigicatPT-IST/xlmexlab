@@ -1,0 +1,17 @@
+{
+    "time_units" : ["hour", "months", "h", "hr", "hrs", "hours", "minutes", "min", "minute", "second", "seconds", "s", "sec", "day", "days"],
+    "temperature_units" : ["C", "K", "F", "Celsius", "Kelvin", "Fahrenheit", "\u25e6C"],
+    "pressure_units" : ["bar", "atm", "atmospheres", "atmosphere", "pa", "pascal", "psi"],
+    "quantity_units" : ["moles", "mol", "gram", "g", "liter", "L", "m3", "cm3"],
+    "size_units" : ["m", "mesh"],
+    "stirring_units" : ["rpm"],
+    "heat_ramp_units" : ["C min-1", "C/min", "K min-1", "K/min", "C\u00b7min", "deg\u00b7min\u22121", "C min\u22121", "C\u00b7min\u22121", "℃ per minute", "C per minute", "K per minute", "°C min-1", "°C/min", "°C\u00b7min", "°C min\u22121", "°C\u00b7min\u22121",  "°C per minute", "°C·min-1"],
+    "concentration_units" : ["cm3 per gram of zeolite", "M", "mol/L", "mol/cm3", "mol L\u22121", "mol cm\u22123", "mol\u00b7L\u22121", "mol\u00b7cm\u22123", "%", "wt.%", "mg ml-1", "mM", "mg·mL-1", "mmol L−1"],
+    "flow_rate_units" : ["cm3 min-1", "cm3/min", "cm3 min\u22121", "cm3\u00b7min\u22121", "cm3\u00b7min", "ml min-1", "ml/min", "ml min\u22121", "ml\u00b7min\u22121", "ml\u00b7min", "sccm", "ml.min−1"],
+    "time_words" : ["overnight", "some time"],
+    "temperature_words" : ["room temperature", "ambient temperature", "steam bath", "rt", "reflux", "freeze", "liquid nitrogen", "ice-bath", "ice bath"],
+    "pressure_words" : ["reduced pressure", "high pressure", "low pressure", "autogeneous"],
+    "atmosphere_words" : ["nh3", "nitrogen", "n2", "argon", "ar", "air", "inert", "oxygen", "o2", "helium", "he", "high vacuo", "low vacuo", "vacuo", "high vacuum", "low vacuum", "vacuum", "h2", "h2/ar"],
+    "amount_words" : ["half"],
+    "size_words" : []
+}

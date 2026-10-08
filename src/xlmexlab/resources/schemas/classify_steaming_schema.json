@@ -1,0 +1,9 @@
+{
+  "expertise": "You are an expert in material preparation.",
+  "initialization": "Answer the questions as truthfully as possible. Answer No if you are unsure.",
+  "objective":"Analyse the following paragraph:",
+  "definitions": {"Initialization" : "To answer the question consider the following description of steaming",
+              "Steaming" : "Thermochemical or Hydrothermal treatment with water vapour to remove aluminum favouring dealuminaton"},
+  "answer_schema": {},
+  "conclusion":  "Does this paragraph contains the description on how the steaming of a zeolite Y or faujasite was performed? Answer yes or no with no justification."
+}

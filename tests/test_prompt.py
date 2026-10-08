@@ -1,4 +1,4 @@
-from zs4procext.prompt import PromptFormatter
+from xlmexlab.prompt import PromptFormatter
 
 
 def test_format_action():
