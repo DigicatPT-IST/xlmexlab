@@ -261,7 +261,7 @@ PARAM_META = {
 
     "dose_group": {
         "fields": [
-            "parameter_name", "value", "unit", "sample_code", "schedule",
+            "parameter_name", "value", "unit", "therapeutic_molecule", "sample_code", "schedule",
         ],
     },
 
@@ -285,10 +285,19 @@ PARAM_META = {
 
     "biodistribution": {
         "fields": [
-            "parameter_name", "value", "unit", "condition", "drug_name"
+            "parameter_name", "value", "unit", "condition", "sample_code"
         ],
     },
 }
+
+#non-lipids
+
+NON_LIPIDS = {
+    "dextrose", "dex", "glucose", "sucrose", "trehalose",
+    "chloroform", "ethanol", "methanol", "water", "pbs", "hepes", "dmso", "nacl",
+    "dir", "dii", "did", "dio", "c6", "coumarin6", "fitc", "cy5", "cy7",
+}
+
 
 class ParserNanoparticle(BaseModel):
     _parameters: List[str] = PrivateAttr(default_factory=list)
@@ -417,7 +426,7 @@ class ParserNanoparticle(BaseModel):
                 "organ": organ,
                 "percent": percent,
                 "unit": item.get("unit"),
-                "drug_name": item.get("drug_namre"),
+                "sample_code": item.get("drug_namre"),
 
             })
         processed = sorted(
@@ -534,7 +543,8 @@ class ParserNanoparticle(BaseModel):
             processed.append({
                 "value": value,
                 "unit": unit,
-                "drug_name": item.get("sample_code"),
+                "therapeutic_molecule": item.get("therapeutic_molecule"),
+                "sample_code": item.get("sample_code"),
             })
 
         return processed
@@ -565,6 +575,23 @@ class ParserNanoparticle(BaseModel):
 
         return None
 
+    def postprocess_tumor_size_or_volume(self, data: list[dict]) -> list[dict]:
+        if data is None:
+            return []
+
+        processed = []
+        for item in data:
+            unit = item.get("unit", "")
+
+            # Exclude values measured in grams
+            if unit.strip().lower() == "g":
+                continue
+
+            processed.append(item)
+
+        return processed
+
+
     def replace(self, T_and_F_list: dict, simulated_llm_response: str) -> dict:
         known_param = next(k for k, v in T_and_F_list.items() if v)
         parsed = self.parse_response(simulated_llm_response, known_param)
@@ -578,7 +605,8 @@ class ParserNanoparticle(BaseModel):
 
             "dose_group":
                 self.postprocess_dose_group,
-            
+            "tumor_size_or_volume":
+                self.postprocess_tumor_size_or_volume
         }
 
         for key, fn in postprocessors.items():
@@ -610,7 +638,7 @@ class ParserNanoparticle(BaseModel):
 
     def parse_schedule_response(self, response: str) -> dict[str, str]:
         """
-        Parses the schedule LLM response into a dict of {drug_name: schedule}.
+        Parses the schedule LLM response into a dict of {sample_code: schedule}.
         Expected format per line:  DrugName | single_dose
         """
         results = {}
@@ -626,10 +654,10 @@ class ParserNanoparticle(BaseModel):
             if len(parts) < 2:
                 continue
 
-            drug_name = parts[0]
+            sample_code = parts[0]
             schedule  = parts[1] if parts[1] else "unknown"
 
-            results[drug_name] = schedule
+            results[sample_code] = schedule
 
         return results
 
@@ -637,7 +665,7 @@ class ParserNanoparticle(BaseModel):
     def update_schedule(self, T_and_F_list: dict, schedule_raw: str) -> dict:
         """
         Parses the raw schedule LLM response and injects 'schedule'
-        into each entry of dose_group, matched by drug_name.
+        into each entry of dose_group, matched by sample_code.
         """
         if "dose_group" not in T_and_F_list or not T_and_F_list["dose_group"]:
             return T_and_F_list
@@ -646,88 +674,64 @@ class ParserNanoparticle(BaseModel):
         print(f"  [PARSER.update_schedule] Parsed schedule: {parsed}")
 
         for entry in T_and_F_list["dose_group"]:
-            drug_name = entry.get("drug_name")
-            entry["schedule"] = parsed.get(drug_name, "unknown")
-            print(f"  [PARSER.update_schedule] {drug_name} → {entry['schedule']}")
+            sample_code = entry.get("sample_code")
+            entry["schedule"] = parsed.get(sample_code, "unknown")
+            print(f"  [PARSER.update_schedule] {sample_code} → {entry['schedule']}")
 
         return T_and_F_list
+
+    @staticmethod
+    def _alnum_key(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
 
     def parse_missing_lipids(self, response: str) -> list[str]:
         response = response.strip()
         if not response or response.lower() in ("none", "n/a", "-"):
             return []
-
         items = []
         for raw_line in response.splitlines():
-            line = raw_line.strip(" -•\t")
-            if not line or line.lower() == "none":
-                continue
-            items.append(line)
+            line = raw_line.strip(" -•*\t,;.()[]")
+            if line and line.lower() != "none":
+                items.append(line)
         return items
 
     @staticmethod
     def _norm_key(s: str) -> str:
         """Lowercase + collapse whitespace, for case/space-insensitive comparisons."""
         return " ".join(s.strip().lower().split())
-
-    def update_lipid_composition(
-        self,
-        T_and_F_list: dict,
-        missing_raw: str,
-        normalization_map: dict,
-        generic_terms: dict,
-    ) -> dict:
+    
+    def update_lipid_composition(self, T_and_F_list, missing_raw, normalization_map, generic_terms):
         if "lipid_composition" not in T_and_F_list:
             return T_and_F_list
 
-        existing = T_and_F_list.get("lipid_composition") or []
-        missing_items = self.parse_missing_lipids(missing_raw)
-        print(f"  [PARSER.update_lipid_composition] LLM reported missing: {missing_items}")
+        regex_items = T_and_F_list.get("lipid_composition") or []
+        llm_items = self.parse_missing_lipids(missing_raw)
+        print(f"  [PARSER.update_lipid_composition] regex: {regex_items} | LLM: {llm_items}")
 
-        # normalized lookup: norm_key -> canonical form already present
-        existing_norm = {self._norm_key(e): e for e in existing}
+        norm_lookup = {self._alnum_key(k): v for k, v in normalization_map.items()}
+        norm_lookup[self._alnum_key("m2000PEG DSPE")] = "DSPE-PEG2000"
+        non_lipid_keys = {self._alnum_key(x) for x in NON_LIPIDS}
 
-        # normalized lookup for the normalization map (handles e.g. "Mc3" vs "MC3")
-        norm_map_lookup = {self._norm_key(k): v for k, v in normalization_map.items()}
+        # LLM list is the base; regex items are only kept if they pass the same filter
+        # (switch the order to regex_items + llm_items if you want regex to stay as base)
+        candidates = llm_items + regex_items
 
-        normalized_new = []
-        for item in missing_items:
-            item_key = self._norm_key(item)
-
-            # resolve to canonical form via normalization_map (case-insensitive)
-            canonical = norm_map_lookup.get(item_key, item)
-            canonical_key = self._norm_key(canonical)
-
-            # skip if it already exists (case/space-insensitive) in regex result or in this batch
-            if canonical_key in existing_norm:
-                print(f"  [PARSER.update_lipid_composition] Skipping '{item}' -> already present as '{existing_norm[canonical_key]}'")
+        merged, seen = [], set()
+        for item in candidates:
+            canonical = norm_lookup.get(self._alnum_key(item), item)
+            key = self._alnum_key(canonical)
+            if not key or key in non_lipid_keys or key in seen:
                 continue
+            seen.add(key)
+            merged.append(canonical)
 
-            already_added = any(self._norm_key(n) == canonical_key for n in normalized_new)
-            if already_added:
-                continue
-
-            normalized_new.append(canonical)
-
-        merged = list(existing) + normalized_new
-        # final de-dup pass, case/space-insensitive, keeps first occurrence
-        seen = {}
-        deduped = []
-        for item in merged:
-            key = self._norm_key(item)
-            if key not in seen:
-                seen[key] = True
-                deduped.append(item)
-        merged = deduped
-
-        # re-apply generic-term suppression (e.g. drop "phosphatidylcholine" if a specific PC is present)
+        # generic-term suppression (e.g. drop "phosphatidylcholine" if a specific PC exists)
+        merged_keys = {self._alnum_key(m) for m in merged}
         for generic, specific_set in generic_terms.items():
-            generic_key = self._norm_key(generic)
-            specific_keys = {self._norm_key(s) for s in specific_set}
-            merged_keys = {self._norm_key(m) for m in merged}
-
-            if generic_key in merged_keys and merged_keys & specific_keys:
-                merged = [m for m in merged if self._norm_key(m) != generic_key]
+            specific_keys = {self._alnum_key(s) for s in specific_set}
+            if self._alnum_key(generic) in merged_keys and merged_keys & specific_keys:
+                merged = [m for m in merged if self._alnum_key(m) != self._alnum_key(generic)]
 
         T_and_F_list["lipid_composition"] = merged if merged else None
         return T_and_F_list
@@ -826,17 +830,17 @@ class ParserNanoparticle(BaseModel):
             if code == "<CODE>":
                 continue
 
-            drug_name = None if drug.lower() in ("none", "", "-") else drug
-            if drug_name is None:
+            sample_code = None if drug.lower() in ("none", "", "-") else drug
+            if sample_code is None:
                 continue  # Skip formulations without a drug name
 
-            drug_names = self.extract_cargos(drug_name)
+            sample_codes = self.extract_cargos(sample_code)
 
-            if not drug_names:
-                drug_names=[drug_name]
+            if not sample_codes:
+                sample_codes=[sample_code]
 
             registry[code.upper()] = {
-                "drug_name": drug_names,
+                "sample_code": sample_codes,
                 "load": load if load in ("loaded", "unloaded") else None,
             }
 

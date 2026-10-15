@@ -817,6 +817,7 @@ NORMALIZATION_MAP = {
     "mPEG_2000-DSPE": "DSPE-PEG2000",  # escolher forma dominante
     "mPEG_2000 DSPE": "DSPE-PEG2000",
     "hydrogenated soy phosphatidylcholine": "HSPC",
+    "hydrogenated soybean phosphatidylcholine": "HSPC",
     "cholesterol hemisuccinate": "CHEMS",
     "sphingomyelin": "SM",
     "phosphatidylserine": "PS",
@@ -841,8 +842,7 @@ STIMULUS_MAP = {
 }
  
 # bioconjugation
-COVALENT_KEYWORDS     = ["covalent", "conjugated", "conjugation", "crosslinked",
-                          "thioether", "amide bond", "maleimide", "click chemistry",
+COVALENT_KEYWORDS     = ["covalent", "crosslinked", "thioether", "amide bond", "maleimide", "click chemistry",
                           "NHS ester", "EDC coupling", "disulfide conjugation", "mannose-modified" ]
 ELECTROSTATIC_KEYWORDS  = ["electrostatic",	"electrostatically bound", "electrostatically adsorbed", "ionic interaction", "ionic interactions", "ionic complex"
                            	"ionic complexation", "polyelectrolyte complex", "polyelectrolyte complexation", "ion pairing", "charge interaction", "charge-mediated", 
@@ -889,7 +889,8 @@ ACTIVE_TARGETING_KEYWORDS = [
 TARGETING_LIGANDS = (
     r"folate|folic acid|transferrin|RGD|iRGD|aptamer|AS1411|hyaluronic acid|HA|"
     r"mannose|galactose|lactoferrin|biotin|peptide|antibody|anti-[A-Za-z0-9-]+|"
-    r"affibody|nanobody|trastuzumab|cetuximab|EGF|CD44|CD47"
+    r"affibody|nanobody|trastuzumab|cetuximab|EGF|CD44|CD47|FR|TfR|EGFR|HER2|integrin|αvβ3|"
+    r"nucleolin|CD47|LRP|asialoglycoprotein|GLUT1"
 )
 ATTACHMENT = (
     r"modified|conjugated|functionalized|functionalised|decorated|coated|"
@@ -900,6 +901,22 @@ ACTIVE_LIGAND_RX = re.compile(
     rf"|\b(?:{ATTACHMENT})\s+(?:with|by)\s+(?:{TARGETING_LIGANDS})\b",
     re.I,
 )
+
+ACTIVE_RECEPTOR_RX = re.compile(
+    rf"\b(?:{TARGETING_LIGANDS})\s+receptors?[-\s]+(?:mediated|targeted|targeting|binding|dependent)\b"
+    rf"|\breceptor[-\s]+mediated\s+(?:uptake|endocytosis|internali[sz]ation|targeting|delivery)\b"
+    rf"|\b(?:{TARGETING_LIGANDS})[-\s]+(?:mediated|targeted|targeting)\s+(?:uptake|endocytosis|internali[sz]ation|delivery)\b"
+    rf"|\bligand[-\s]+receptor\b",
+    re.I,
+)
+
+EPR_NEGATIVE_RX = re.compile(
+    r"(?:limit\w*|heterogene\w*|insufficient|poor|lack\w*|beyond|overcome|"
+    r"not\s+rely|independent\s+of|without)\W+(?:\w+\W+){0,4}EPR"
+    r"|EPR\W+(?:\w+\W+){0,4}(?:limit\w*|heterogene\w*|insufficient|controvers\w*)",
+    re.I,
+)
+
 
 
 # drug loading 
@@ -970,24 +987,31 @@ DRUG_LOADING_MAP = {
 SINGLE_DOSE_KEYWORDS   = ["single dose", "single injection", "one injection",
                            "single administration", "single i.v."]
 
+
+
 NUMBER_WORDS = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)"
 
+FREQ_PERIOD = r"(?:day|week|month|cycle|\d+\s*days?|\d+\s*weeks?)"
+
 MULTIPLE_DOSE_PATTERNS = [
-    rf"every\s+{NUMBER_WORDS}\s+days?",
-    r"every\s+other\s+day",
-    r"daily",
-    r"weekly",
-    r"biweekly",
-    r"q\.?d\.?",
-    r"b\.?i\.?d\.?",
-    r"q\d+d",
-    rf"\s+{NUMBER_WORDS}\s+times\s+a\s+week",
-    r"repeated",
-    r"multiple\s+dose",
-    r"cycle",
-    r"on days",
-    r"days",
+    rf"every\s+{NUMBER_WORDS}\s+(?:days?|weeks?|hours?)",
+    rf"every\s+(?:other\s+)?(?:day|week|month)",
+    rf"(?:each|per|a)\s+(?:day|week|month)",          # "each week", "per week", "a week"
+    rf"(?:once|twice|{NUMBER_WORDS}\s+times)\s+(?:a|per|each)\s+(?:day|week|month)",
+    rf"(?:once|twice)\s+(?:daily|weekly)",
+    r"\b(?:daily|weekly|biweekly|bi-weekly)\b",
+    r"\bq\.?d\.?\b", r"\bb\.?i\.?d\.?\b", r"\bq\d+d\b",
+    r"\brepeated\b", r"\bmultiple\s+doses?\b",
+    r"\bcycles?\b", r"\bon\s+days\b",
 ]
+MULTIPLE_RX = [re.compile(p, re.I) for p in MULTIPLE_DOSE_PATTERNS]
+
+# "single dose" immediately followed by a frequency is NOT a one-time dose
+SINGLE_BUT_REPEATED_RX = re.compile(
+    rf"single\s+(?:dose|injection|administration)s?\s+(?:each|per|every|a)\s+{FREQ_PERIOD}",
+    re.I,
+)
+
  
 # route and subroutes
 SYSTEMIC_ROUTES = {
@@ -1088,16 +1112,15 @@ DRUG_CONTEXT_RX = re.compile(
 
 # therapy types
 THERAPY_MAP = {
-    "Chemotherapy":              {"keywords": ["chemotherapy", "chemo", "chemoterapeutic", "anticancer drug"
+    "Chemotherapy":              {"keywords": ["chemotherapy", "chemo", "chemoterapeutic", "anticancer drug",
                                   "doxorubicin", "paclitaxel", "docetaxel",
                                   "gemcitabine", "carboplatin", "cisplatin",
                                   "eribulin", "capecitabine", "nab-paclitaxel",
                                   "abraxane", "sacituzumab govitecan"],
                                   "abbr": ["ADC", "DOX", "PTX"]},
 
-    "Gene therapy":              {"keywords": ["gene therapy", "siRNA", "mRNA", "plasmid",
-                                  "gene silencing", "gene delivery", "miRNA",
-                                  "antisense oligonucleotide", "shRNA"], 
+    "Gene therapy":              {"keywords": ["gene therapy", "gene silencing", "gene delivery",
+                                  "antisense oligonucleotide"], 
                                   "abbr": ["ASO","CRISPR", "Cas9", "cas9"]},   
 
     "Immunotherapy":             {"keywords": ["immunotherapy", "immune checkpoint",
@@ -1204,8 +1227,27 @@ THERAPY_CATEGORIES = {
     "Radiofrequency": RADIOFREQUENCY_CATEGORIES,
 }
 
+NUCLEIC_DELIVERY_RX = re.compile(
+    r"encapsulat|load(?:ed|ing)|deliver|transfect|complex|condens|vaccine|"
+    r"LNP|lipoplex|polyplex|N/P|knockdown|knock-down|silenc|therap",
+    re.I,
+)
+GENERIC_NUCLEIC_TERMS = {"siRNA", "mRNA", "miRNA", "shRNA", "plasmid"}
+
+#Mask readout phrases before detecting therapies
+NUCLEIC_READOUT_RX = re.compile(
+    r"\b(?:m|mi|si|sh|sa|circ)?RNA\s+(?:expression|levels?|transcripts?|abundance|"
+    r"quantification|sequencing|seq)\b"
+    r"|\b(?:expression|levels?)\s+of\s+(?:\w+\s+)?(?:m|mi|si|sh)?RNA\b"
+    r"|\b(?:qRT-?PCR|RT-?qPCR|RT-?PCR|qPCR|western\s+blot\w*|RNA-?seq|"
+    r"gene\s+expression|protein\s+expression|downregulat\w+|upregulat\w+|"
+    r"RNA\s+extraction|RNA\s+isolation|total\s+RNA)\b",
+    re.I,
+)
+
+
 # study strategy 
-DIAGNOSIS_KEYWORDS    = ["diagnosis", "diagnostic", "imaging only", "contrast agent"]
+DIAGNOSIS_KEYWORDS    = ["diagnosis", "diagnostic", "imaging only", "contrast agent", "imaging"]
 
 THERAPY_KEYWORDS    = ["therapy", "treatment", "therapeutic", "therapeutics", "drug delivery",
                     "drug release"]
@@ -1229,10 +1271,47 @@ INVITRO_GENERIC_KEYWORDS = [
 ]
 
 
-XENOGRAFT_KEYWORDS    = ["xenograft", "human tumor", "human cell line",
-                          "human cancer cells", "xenografts", "cell into", "BALB/c nude mice", "SCID mice"] # MDA-MB-231-BrM brain metastasis model in SCID mice
-ALLOGRAFT_KEYWORDS    = ["allograft", "syngeneic", "syngeneic model",
-                          "murine tumor","4t1", "ct26", "b16", "llc", "e0771", "BALB/c mice"] # duvida em BALB/c mice
+XENOGRAFT_KEYWORDS    = [ "human tumor into ", "human cell line into",
+                          "human cancer cells into", "cell into", "BALB/c nude mice", "SCID mice"] # MDA-MB-231-BrM brain metastasis model in SCID mice
+
+XENOGRAFT_2ND_PTION    = ["xenograft", "xenografts"] # MDA-MB-231-BrM brain metastasis model in SCID mice
+
+XENOGRAFT_CELL_LINES = [ "MDA-MB-231", "MCF-7"]
+
+ALLOGRAFT_KEYWORDS = ["allograft", "syngeneic", "syngeneic model", "murine tumor"]
+
+# murine cell lines: only evidence of an allograft when used in an animal
+ALLOGRAFT_CELL_LINES = ["4T1", "CT26", "B16", "B16F10", "LLC", "E0771"]
+
+INVIVO_CONTEXT_RX = re.compile(
+    r"\b(?:mice|mouse|murine|rats?|in\s+vivo|xenograft\w*|tumou?r[-\s]bearing|"
+    r"bearing|inject\w+|inoculat\w+|implant\w+|transplant\w+|BALB/c|C57BL/6|nude|SCID)\b",
+    re.I,
+)
+
+INVITRO_CONTEXT_RX = re.compile(
+    r"\b(?:in\s+culture|cultured|cell\s+culture|in\s+vitro|seeded|plated|wells?|"
+    r"incubat\w+|cells\s+were\s+(?:grown|maintained|treated)|MTT|viability|uptake)\b",
+    re.I,
+)
+
+# immune status 
+IMMUNOCOMPROMISED_KEYWORDS = [
+    "nude mice", "athymic", "immunodeficient",
+    "immunocompromised", "NCr nude", "no T cell", "BALB/c nude", "MDA-MB-231-bearing mouse", "MDA-MB-231 bearing mouse"
+]
+IMMUNOCOMPROMISED_ABBR = [
+     "SCID", "NOD/SCID", "NSG", "RAG", #"MDA-MB-231", "MCF-7", FARIA SENTIDO MAS TEM QUE SER REFERIDO DEPOIS P RATINHO SENAO PODE SER SO UM TESTE IN VITRO
+]
+
+IMMUNOCOMPETENT_KEYWORDS = [
+    "BALB/c mice", "C57BL/6", "immunocompetent", "syngeneic", "intact immune",
+    "FVB/N", 
+]
+
+IMMUNOCOMPETENT_ABBR = []
+
+
 ORTHOTOPIC_KEYWORDS = [
     "orthotopic", "orthotopically",
     "mammary fat pad", "mammary fatpad", "mammary pad",
@@ -1271,29 +1350,13 @@ VIRUS_INDUCED_WORDS = [
     "virus induced", "virus-induced", "viral-induced", "viral carcinogenesis",
     "oncogenic virus", "viral tumor model", "viral tumour model"]
  
-# immune status 
-IMMUNOCOMPROMISED_KEYWORDS = [
-    "nude mice", "athymic", "immunodeficient",
-    "immunocompromised", "NCr nude", "no T cell", "BALB/c nude"
-]
-IMMUNOCOMPROMISED_ABBR = [
-     "SCID", "NOD/SCID", "NSG", "RAG", #"MDA-MB-231", "MCF-7", FARIA SENTIDO MAS TEM QUE SER REFERIDO DEPOIS P RATINHO SENAO PODE SER SO UM TESTE IN VITRO
-]
 
-IMMUNOCOMPETENT_KEYWORDS = [
-    "BALB/c mice", "C57BL/6", "immunocompetent", "syngeneic", "intact immune",
-    "FVB/N", 
-]
-
-IMMUNOCOMPETENT_ABBR = [
-    "4T1", "E0771", 
-]
  
 # cancer type 
 CANCER_TYPE_MAP = {
     "Breast":   ["breast", "4T1", "MCF-7", "MDA-MB", "T47D", "BT-474", "SKBR3",
                   "ZR-75", "SUM149", "SUM159", "HCC1806", "HCC1937", "HCC70",
-                  "MDA-MB-231", "MDA-MB-468", "MDA-MB-436", "Hs578T",
+                  "MDA-MB-231", "MDA-MD-231", "MD-MDB-231", "MDA-MG-231", "MDA-MB-468", "MDA-MB-436", "Hs578T",
                   "BT549", "CAL-51", "TNBC"],}
     #"Lung":     ["lung", "A549", "H460", "LLC", "Lewis lung", "H1299","H1975", "PC9"],
     #"Liver":    ["liver", "hepatocellular", "HCC", "HepG2", "Huh7"],
@@ -1336,7 +1399,7 @@ IMAGING_MAP = {
 
     "Fluorescence": {
         "abbrs": ["NIRF", "DiI", "DiD", "DiR", "FITC", "Cy5", "Cy7", "CF750.DSA"],
-        "keywords": ["fluorescence", "fluorescent", "near-infrared fluorescence"]
+        "keywords": ["fluorescence", "fluorescent", "near-infrared fluorescence", "immunofluorescence"]
     },
 
     "PET": {
@@ -1370,8 +1433,8 @@ IMAGING_MAP = {
     },
 
     "Others": {
-        "abbrs": ["SPECT", "99mTc", "111In"],
-        "keywords": ["single-photon emission"]
+        "abbrs": ["SPECT", "99mTc", "111In",],
+        "keywords": ["single-photon emission", "radiolabel"]
     },
     "Others":{
         "abbrs": [],
@@ -1545,6 +1608,16 @@ def _compile_word_rx(keyword: str, suffixes: Tuple[str, ...]) -> "re.Pattern":
         re.IGNORECASE,
     )
 
+
+def _mask_readouts(text: str) -> str:
+    return NUCLEIC_READOUT_RX.sub(" ", text)
+
+def _has_nucleic_cargo(text: str) -> bool:
+    for sentence in _split_sentences(text):
+        if (_word_sufix_keyword_match(sentence, list(GENERIC_NUCLEIC_TERMS))
+                and NUCLEIC_DELIVERY_RX.search(sentence)):
+            return True
+    return False
 
 def _word_sufix_keyword_match(
     text: str,
@@ -1841,8 +1914,17 @@ class NanoparticleExtractor(BaseModel):
         return None
 
     def _extract_targeting_type(self, text: str) -> Optional[str]:
-        active = ( _word_sufix_keyword_match(text, ACTIVE_TARGETING_KEYWORDS)or bool(ACTIVE_LIGAND_RX.search(text)))
-        passive = _abr_first_keyword_match(text, PASSIVE_TARGETING_KEYWORDS, PASSIVE_TARGETING_ABBR)
+        active = (_word_sufix_keyword_match(text, ACTIVE_TARGETING_KEYWORDS)
+            or bool(ACTIVE_LIGAND_RX.search(text))
+            or bool(ACTIVE_RECEPTOR_RX.search(text))
+        )
+
+        # passive: check sentence by sentence so a negative EPR sentence is ignored
+        passive = any(
+            _abr_first_keyword_match(s, PASSIVE_TARGETING_KEYWORDS, PASSIVE_TARGETING_ABBR)
+            and not EPR_NEGATIVE_RX.search(s)
+            for s in _split_sentences(text)
+        )
 
         if active and passive:
             return "active and passive"
@@ -1851,7 +1933,6 @@ class NanoparticleExtractor(BaseModel):
         if passive:
             return "passive"
         return None
-
     def _extract_lipid_composition(self, text: str) -> Optional[List[str]]:
         pattern = r"\b(" + "|".join(map(re.escape, LIPID_KEYWORDS)) + r")\b"
         matches = [m.group(0) for m in re.finditer(pattern, text, re.IGNORECASE)]
@@ -1924,37 +2005,29 @@ class NanoparticleExtractor(BaseModel):
             return None
     
     def _extract_therapies(self, text: str):
-        therapies = set()
+        clean = _mask_readouts(text)
+        therapies = []                                   # list keeps order, set does not
 
-        # 1. Existing therapy detection from THERAPY_MAP
-        all_therapies = _all_map_matches(text, THERAPY_MAP)
+        def add(t):
+            if t not in therapies:
+                therapies.append(t)
 
-        for therapy in all_therapies:
-            therapies.add(therapy)
+        for t in _all_map_matches(clean, THERAPY_MAP):
+            add(t)
 
-        # 2. Additional detection based on cargo categories
-        cargo_categories = self.extract_cargo_categories(text) or []
+        if _has_nucleic_cargo(clean):
+            add("Gene therapy")
 
-        for category in cargo_categories:
-            for therapy, categories in THERAPY_CATEGORIES.items():
-                if category in categories:
-                    therapies.add(therapy)
+        for category in self.extract_cargo_categories(clean) or []:
+            for therapy, cats in THERAPY_CATEGORIES.items():
+                if category in cats:
+                    if therapy == "Gene therapy" and not _has_nucleic_cargo(clean):
+                        continue                         # generic nucleic acid without delivery context
+                    add(therapy)
 
-        # 3. Keep the original output structure
-        therapies = list(therapies)
-
-        therapy_a = therapies[0] if len(therapies) > 0 else None
-        therapy_b = therapies[1] if len(therapies) > 1 else None
-        therapy_c = therapies[2] if len(therapies) > 2 else None
-
-        if therapy_b:
-            combined = "Combination therapy"
-        elif therapy_a:
-            combined = "Monotherapy"
-        else:
-            combined = None
-
-        return therapy_a, therapy_b, therapy_c, combined
+        a, b, c = (therapies + [None, None, None])[:3]
+        combined = "Combination therapy" if b else ("Monotherapy" if a else None)
+        return a, b, c, combined
     
     def _extract_study_strategy(self, text: str) -> Optional[str]:
         if _word_sufix_keyword_match(text, THERANOSTICS_KEYWORDS):
@@ -1962,7 +2035,15 @@ class NanoparticleExtractor(BaseModel):
         diag = _word_sufix_keyword_match(text, DIAGNOSIS_KEYWORDS)
         
         therapy_a, therapy_b, therapy_c, combined = self._extract_therapies(text)
+
         ther = _word_sufix_keyword_match(text, THERAPY_KEYWORDS) or therapy_a is not None
+
+        therapy_a, therapy_b, therapy_c, combined = self._extract_therapies(text)
+
+        print("diag:", diag)
+        print("therapy_a:", therapy_a)
+        print("ther:", ther)
+
         if diag and ther:
             return "Theranostics"
         if diag:
@@ -1970,15 +2051,7 @@ class NanoparticleExtractor(BaseModel):
         if ther:
             return "Therapy"
         return None
-    
-    def _extract_study_strategy(self, text: str) -> Optional[str]:
-        if _first_keyword_match(text, THERANOSTICS_KEYWORDS):
-            return "Theranostics"
-        if _first_keyword_match(text, DIAGNOSIS_KEYWORDS):
-            return "Diagnosis"
-        if _first_keyword_match(text, THERAPY_KEYWORDS):
-            return "Therapy"
-        return None
+
         
     def _route_sentence_is_valid(self, sentence: str, rules: dict) -> bool:
         """Guards applied AFTER _abr_first_keyword_match already said True."""
@@ -2093,24 +2166,38 @@ class NanoparticleExtractor(BaseModel):
         
 
     def _extract_dosing_schedule(self, text: str) -> Optional[str]:
-        if self._extract_dose(text)==False:
+        if not self._extract_dose(text):
             return None
+
+        # 1) repeated schedule wins (also catches "single dose each week")
+        if SINGLE_BUT_REPEATED_RX.search(text) or any(rx.search(text) for rx in MULTIPLE_RX):
+            return "Multiple-dose"
+
+        # 2) only then a true one-time dose
         if _first_keyword_match(text, SINGLE_DOSE_KEYWORDS):
             return "Single Dose"
-        for pattern in MULTIPLE_DOSE_PATTERNS:
-            if re.search(pattern, text):
-                return "Multiple-dose"
         return None
 
 
     # BIOLOGICAL CONTEXT
 
+    def _cell_line_in_vivo(text: str, cell_lines: List[str]) -> bool:
+        for sentence in _split_sentences(text):
+            if not _match_abbreviation(sentence, cell_lines):
+                continue
+            if INVIVO_CONTEXT_RX.search(sentence):
+                return True
+        return False
+
     def _extract_tumor_model(self, text: str) -> Optional[str]:
-        is_xeno  = _first_keyword_match(text, XENOGRAFT_KEYWORDS)
-        is_allo  = _first_keyword_match(text, ALLOGRAFT_KEYWORDS)
+        is_xeno  = (_first_keyword_match(text, XENOGRAFT_KEYWORDS) or self._cell_line_in_vivo(text, XENOGRAFT_CELL_LINES))
+        is_xeno_2  = _first_keyword_match(text, XENOGRAFT_KEYWORDS)
+        is_allo = (_first_keyword_match(text, ALLOGRAFT_KEYWORDS)or self._cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES))
         is_ortho = _abr_first_keyword_match(text, ORTHOTOPIC_KEYWORDS, ORTHOTOPIC_ABBR)
         is_heter = _abr_first_keyword_match(text, HETEROTOPIC_KEYWORDS, HETEROTOPIC_ABBR)
-        base = "Xenograft" if is_xeno else ("Allograft" if is_allo else None)
+        base = "Xenograft" if is_xeno else ("Allograft" if is_allo else "Xenograft" if is_xeno_2 else None)
+        if (is_xeno and is_allo) or (is_xeno_2 and is_allo):
+            print("ERROR WITH TUMOR MODEL KEYWORDS")
         loc  = "Orthotopic" if is_ortho else ("Heterotopic" if is_heter else None)
         if base and loc:
             return f"{base} {loc}"
@@ -2129,9 +2216,9 @@ class NanoparticleExtractor(BaseModel):
                 #return "In vitro generic keyword"
 
     def _extract_immune_status(self, text: str) -> Optional[str]:
-        if _abr_first_keyword_match(text, IMMUNOCOMPROMISED_KEYWORDS, IMMUNOCOMPROMISED_ABBR):
+        if _abr_first_keyword_match(text, IMMUNOCOMPROMISED_KEYWORDS, IMMUNOCOMPROMISED_ABBR) or self._cell_line_in_vivo(text, XENOGRAFT_CELL_LINES):
             return "Immunocompromised"
-        if _first_keyword_match(text, IMMUNOCOMPETENT_KEYWORDS):
+        if _first_keyword_match(text, IMMUNOCOMPETENT_KEYWORDS) or self._cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES):
             return "Immunocompetent"
         return None
 
@@ -2228,12 +2315,16 @@ class NanoparticleExtractor(BaseModel):
     
     # CARGO
 
-    def extract_cargos(self, text: str)-> Optional[List]:
-        """Return all unique cargos in order found."""
+    def extract_cargos(self, text: str) -> list:
         found = []
         for pat, name in COMPILED_MAP:
-            if pat.search(text) and name not in found:
-                found.append(name)
+            m = pat.search(text)
+            if not m or name in found:
+                continue
+            token = m.group(0)
+            if token.lower() in CASE_SENSITIVE_ALIASES and not token.isupper():
+                continue
+            found.append(name)
         return found
     
     def cargo_category(self, name: str) -> Optional[str]:

@@ -99,11 +99,11 @@ PARAM_META: dict[str, dict] = {
     "encapsulation_efficiency_pct": {
         "description": "Encapsulation efficiency or EE",
         "unit_hint": "%",
-        "specific_format": "encapsulation_efficiency_pct | <value> | <unit> | <drug_name>",
+        "specific_format": "encapsulation_efficiency_pct | <value> | <unit> | <sample_code>",
         "field_rules": {
             "<value>": "ONLY the numeric EE (Encapsulation Efficiency) exactly as reported (include the standard deviation if available).",
             "<unit>": "Percentage or unit as written.",
-            "<drug_name>": "Drug or sample code (nanoparticle name) if explicitly mentioned.",
+            "<sample_code>": "Drug or sample code (nanoparticle name) if explicitly mentioned.",
         },
         "exclude": [
             "theoretical efficiency",
@@ -126,11 +126,11 @@ PARAM_META: dict[str, dict] = {
     "distribution_half_life_h": {
         "description": "Distribution half-life (alpha phase)",
         "unit_hint": "h",
-        "specific_format": "distribution_half_life_h | <value> | <unit> | <drug_name>",
+        "specific_format": "distribution_half_life_h | <value> | <unit> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric half-life exactly as reported.",
             "<unit>": "Unit in hours or as stated.",
-            "<drug_name>": "Sample code (nanoparticle name) associated to the nanoparticle.",
+            "<sample_code>": "Sample code (nanoparticle name) associated to the nanoparticle.",
         },
         "exclude": [],
     },
@@ -138,11 +138,11 @@ PARAM_META: dict[str, dict] = {
     "circulation_half_life_h": {
         "description": "Circulation / elimination half-life",
         "unit_hint": "h",
-        "specific_format": "circulation_half_life_h | <value> | <unit> | <drug_name>",
+        "specific_format": "circulation_half_life_h | <value> | <unit> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric half-life exactly as reported.",
             "<unit>": "Unit as written.",
-            "<drug_name>": "Drug studied.",
+            "<sample_code>": "Drug studied.",
         },
         "exclude": [],
     },
@@ -150,10 +150,11 @@ PARAM_META: dict[str, dict] = {
     "dose_group": {
         "description": "Administered treatment doses from the AUTHORS' OWN experiment only",
         "unit_hint": "as reported",
-        "specific_format": "dose_group | <value> | <unit> | <sample_code>",
+        "specific_format": "dose_group | <value> | <unit> | <therapeutic_molecule> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric only, exactly as reported. Do NOT include units or route.",
             "<unit>": "Dose unit exactly as written. Valid formats: mg/kg, μg/kg, mg/animal, μg, mg, g, etc.",
+            "<therapeutic_molecule>": "Name of the therapeutic molecule or active therapeutic agent administered in the treatment. Use the name explicitly reported in the study. Do NOT substitute the nanoparticle name, carrier, or formulation name unless it is itself the therapeutic agent. If not reported or not identifiable, use null.",
             "<sample_code>": "Sample code (nanoparticle name) actually administered in this study.",
         },
         "exclude": [
@@ -208,12 +209,12 @@ PARAM_META: dict[str, dict] = {
     "biodistribution": {
         "description": "Organ accumulation/ biodistribution/ off-target sites",
         "unit_hint": "%ID, %ID/g, %, etc.",
-        "specific_format": "biodistribution | <value> | <unit> | <organ>",
+        "specific_format": "biodistribution | <value> | <unit> | <organ> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric accumulation exactly as reported.",
             "<unit>": "Unit exactly as written.",
             "<organ>": "Organ explicitly mentioned.",
-            "<drug_name>":  "Drug/sample code (nanoparticle name) name explicitly associated with the reported biodistribution valueif explicitly written, if not just left it 'unknown'.",
+            "<sample_code>":  "Drug/sample code (nanoparticle name) name explicitly associated with the reported biodistribution valueif explicitly written, if not just left it 'unknown'.",
 
         },
         "exclude": [
@@ -322,7 +323,7 @@ class PromptCreationSchedule(BaseModel):
 
     def build_extraction_prompt_json(
         self,
-        drug_names: list[str],
+        sample_codes: list[str],
     ) -> tuple[dict, list[str]]:
         
         expertise = (
@@ -343,12 +344,16 @@ class PromptCreationSchedule(BaseModel):
         schema_lines: list[str] = []
 
         schema_lines.append(
-            "Rules:"
-            "Use ONLY explicit frequency words ('every X days', 'twice', 'q.d.', 'BID', 'once', 'single dose', 'every week', etc).\n"        
+            "Rules:\n"
+            "Use ONLY explicit frequency words ('every X days', 'each week', 'per week', 'weekly', "
+            "'twice', 'q.d.', 'BID', 'once', 'single dose', etc).\n"
+            "IMPORTANT: 'a single dose each/per/every <day|week|month>' means ONE dose per administration "
+            "repeated at an interval -> multi_dose. "
+            "Use single_dose ONLY if the drug is administered one time in total.\n"
             "Do NOT use timing words ('prior to', '15 min before', 'day 0', 'for X days') as evidence.\n"
-            "Format: <drug_name> | <schedule>\n"
-            "Drug names: " + ", ".join(drug_names)
-            )
+            "Format: <sample_codes> | <schedule>\n"
+            "Drug names: " + ", ".join(sample_codes)
+        )
 
         answer_schema: dict[str, str] = {
             "Format": "\n".join(schema_lines),
@@ -374,34 +379,31 @@ class PromptCreationLipidComposition(BaseModel):
     def build_extraction_prompt_json(self, lipids_found: list[str]) -> dict:
 
         expertise = (
-            "You are an expert assistant for identifying lipid components in "
-            "nanoparticle sample_codes described in scientific text."
+            "You are an expert in liposome and lipid-nanoparticle formulation chemistry."
         )
 
-        initialization = (""
-        )
+        initialization = ("Read the paragraph and list the lipid components it explicitly names.")
 
-        objective = (
-            "Extract every explicitly mentioned lipid, phospholipid, sterol, "
-    "PEG-lipid, ionizable lipid, or lipid-derived compound."
-
-        )
+        objective = ("Extract every explicitly named lipid component, using short names when the text provides them.")
 
 
         schema_lines = [
-        "Task:",
-        "",
-        "- Extract every explicitly named lipid or lipid-derived compound.",
-        "- Preserve each name exactly as written.",
-        "- Do not infer or add compounds that are not explicitly mentioned.",
-        "- Do not extract entities that are only mentioned as sample_codes, nanoparticles, "
-        "- Return each compound once, one per line.",
-        "Paragraph:",
+            "A LIPID is a membrane/vesicle-forming or lipid-anchored component: "
+            "phospholipids, sterols (cholesterol), sphingolipids, PEG-lipids, "
+            "cationic/ionizable lipids, and lipid-anchored conjugates (e.g. DSA conjugates).",
+            "NOT lipids (never output): drugs/cargo, fluorescent dyes or probes "
+            "(DiR, DiI, DiD, DiO, coumarin-6/C6, FITC, Cy5, Cy7), sugars (dextrose, glucose, sucrose), "
+            "salts, buffers, solvents (chloroform, ethanol, water), proteins, "
+            "and non-lipid polymers (PLGA, chitosan).",
+            "NAMING RULE: if the text gives an abbreviation for a lipid, output ONLY the abbreviation "
+            "(e.g. 'Dipalmitoylphosphatidylcholine (DPPC)' -> DPPC). "
+            "If no abbreviation is given, output the name exactly as written.",
+            "Do not invent names. One per line, each once, no bullets, no parentheses, no explanations.",
+            "If there are no lipids, output exactly: none",
         ]
 
         conclusions = "\n".join([
-        "Return ONLY the extracted lipid names, one per line. "
-        "If no lipid is explicitly mentioned, return exactly: none."
+        "Return ONLY the extracted lipid names, one per line or: none."
         ])
 
         return {
@@ -426,7 +428,7 @@ class PromptCreationLoadStatus(BaseModel):
         objective = "Only define each sample_code as loaded, unloaded, or unknown using the rules below."
 
         entries_str = "\n".join(
-            f"- size={e.get('value')} {e.get('unit')}, drug={e.get('drug_name') or '(none)'}"
+            f"- size={e.get('value')} {e.get('unit')}, drug={e.get('sample_code') or '(none)'}"
             for e in size_entries
         )
 
@@ -515,15 +517,26 @@ class PromptCreationFormulationRegistry(BaseModel):
             "(2) whether it is explicitly described as loaded or unloaded/blank. "
             "Only use information explicitly stated in the text."
         )
+        
         schema_lines = [
-            "Format: <code> | <drug_name_or_none> | <loaded/unloaded/unknown>",
-            "Rules:",
-            "- If a candidate is NOT actually a sample_code identifier (e.g. it's a "
-            "method name, unit, or unrelated abbreviation), SKIP it — do not output a line for it.",
-            "- Use 'none' for drug_name if no cargo is stated for that code.",
-            "- Use 'unknown' for load status only if the text genuinely does not state it.",
-            "- One line per valid sample code."
-            "-If no valid sample code remain after filtering, answer exactly: 'none' (without quotes).",
+        "Format: <sample_code> | <drug_name_or_none> | <loaded/unloaded/unknown>",
+        "Rules:",
+        "- The cargo is ONLY the active therapeutic/bioactive molecule that is ENCAPSULATED or "
+        "LOADED into the particle (drug, nucleic acid, protein, imaging agent).",
+        "- The following are NEVER cargo: polymers (PLGA, PLA, PEG), polymer conjugates "
+        "(e.g. L-leucine-PLGA conjugate), lipids, surfactants (Poloxamer, Tween), solvents, "
+        "buffers, cryoprotectants (mannitol), and any material described as replacing or "
+        "substituting another component ('instead of', 'in place of').",
+        "- If a formulation is described as prepared by 'the same procedure' or 'same method' "
+        "as another formulation, it contains the SAME cargo as that formulation, "
+        "unless a different drug is explicitly stated.",
+        "- Expand abbreviations to the full drug name when the text defines them or when the "
+        "same text mentions the drug by full name (e.g. BN = betulin).",
+        "- If a candidate is NOT a sample-code identifier (method name, unit, abbreviation), SKIP it.",
+        "- Use 'none' for drug_name if no cargo is stated.",
+        "- Use 'unknown' for load status only if the text does not state it.",
+        "- One line per valid sample code.",
+        "- If no valid sample code remains, answer exactly: none",
         ]
         return {
             "expertise": expertise,
