@@ -1820,7 +1820,17 @@ def _extract_value_unit_closest_to_keyword(
         return value, None, None, unit
 
     return None
-    return None
+
+
+    # BIOLOGICAL CONTEXT
+
+def _cell_line_in_vivo(text: str, cell_lines: List[str]) -> bool:
+        for sentence in _split_sentences(text):
+            if not _match_abbreviation(sentence, cell_lines):
+                continue
+            if INVIVO_CONTEXT_RX.search(sentence):
+                return True
+        return False
 
 
 class NanoparticleExtractor(BaseModel):
@@ -2179,20 +2189,10 @@ class NanoparticleExtractor(BaseModel):
         return None
 
 
-    # BIOLOGICAL CONTEXT
-
-    def _cell_line_in_vivo(self, text: str, cell_lines: List[str]) -> bool:
-        for sentence in _split_sentences(text):
-            if not _match_abbreviation(sentence, cell_lines):
-                continue
-            if INVIVO_CONTEXT_RX.search(sentence):
-                return True
-        return False
-
     def _extract_tumor_model(self, text: str) -> Optional[str]:
-        is_xeno  = (_first_keyword_match(text, XENOGRAFT_KEYWORDS) or self._cell_line_in_vivo(text, XENOGRAFT_CELL_LINES))
+        is_xeno  = (_first_keyword_match(text, XENOGRAFT_KEYWORDS) or _cell_line_in_vivo(text, XENOGRAFT_CELL_LINES))
         is_xeno_2  = _first_keyword_match(text, XENOGRAFT_KEYWORDS)
-        is_allo = (_first_keyword_match(text, ALLOGRAFT_KEYWORDS)or self._cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES))
+        is_allo = (_first_keyword_match(text, ALLOGRAFT_KEYWORDS)or _cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES))
         is_ortho = _abr_first_keyword_match(text, ORTHOTOPIC_KEYWORDS, ORTHOTOPIC_ABBR)
         is_heter = _abr_first_keyword_match(text, HETEROTOPIC_KEYWORDS, HETEROTOPIC_ABBR)
         base = "Xenograft" if is_xeno else ("Allograft" if is_allo else "Xenograft" if is_xeno_2 else None)
