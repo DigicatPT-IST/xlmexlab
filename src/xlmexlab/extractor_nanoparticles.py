@@ -16,8 +16,23 @@ from xlmexlab.llm import ModelLLM, ModelVLM2
 from xlmexlab.prompt import PromptFormatter
 from xlmexlab.prompt_creation import PromptCreation, PromptCreationImageKeys, PromptCreationIsGraphPrompt, PromptCreationSchedule, PromptCreationLipidComposition, PromptCreationLoadStatus, PromptCreationLipidRatioUnits, PromptCreationFormulationRegistry, PromptCreationCargoCategoryCheck, PromptCreationLipidRatio, PromptCreationSeriesDataPrompt, PromptCreationVerifySeriesPrompt
 from xlmexlab.parser_nanoparticles import ParserNanoparticle, ImageParserKeys, SeriesPointsParser
-from xlmexlab.nanoparticle_paragraph import NORMALIZATION_MAP, GENERIC_TERMS
+from xlmexlab.nanoparticle_paragraph import NORMALIZATION_MAP, GENERIC_TERMS, COMPILED_MAP
 from xlmexlab.nanoparticle_paragraph import CARGO_DB, lookup_cargo_category
+
+NON_CARGO_RX = re.compile(
+    r"\b(PLGA|PLA|PEG|conjugate|poloxamer|compritol|mannitol|"
+    r"leucine[-\s]?PLGA|polymer|lipid|surfactant)\b", re.I
+)
+
+def inherit_cargo(registry: dict) -> dict:
+    for code, info in registry.items():
+        if info.get("therapeutic_molecule"):
+            continue
+        base = re.sub(r"^(conj|blank|empty)[-_\s]*", "", code, flags=re.I)
+        parent = registry.get(base)
+        if parent and parent.get("therapeutic_molecule"):
+            info["therapeutic_molecule"] = list(parent["therapeutic_molecule"])
+    return registry
 
 class NanoparticlesExtractorParagraph(BaseModel):
 
@@ -119,22 +134,24 @@ class NanoparticlesExtractorParagraph(BaseModel):
             # Use data_response directly (it's already a dict from extract_text_info)
             # and check if dose_group is a non-empty list, not True
             dose_group = data_response.get("dose_group")
+
+            print(f'dose group is {dose_group}')
             
             if not dose_group:  # handles None, False, and empty list
                 print("  [EXTRACTOR.extract_schedule_info] No dose_group found, skipping.")
                 return None
 
-            drug_names = [
-                item.get("drug_name")
+            sample_codes = [
+                item.get("sample_code")
                 for item in dose_group
-                if item.get("drug_name") is not None
+                if item.get("sample_code") is not None
             ]
 
-            if not drug_names:
+            if not sample_codes:
                 print("  [EXTRACTOR.extract_schedule_info] No drug names found, skipping.")
                 return None
 
-            if drug_names:
+            if sample_codes:
                 print(f"\n  [EXTRACTOR.extract_schedule_info] Called.")
                 print(f"  [EXTRACTOR.extract_schedule_info] text preview: '{text[:120]}...'")
                 print(f"  [EXTRACTOR.extract_schedule_info] _extracted_flags: {self._extracted_flags}")
@@ -146,7 +163,7 @@ class NanoparticlesExtractorParagraph(BaseModel):
 
                     # FIX: use `text` argument, NOT self._paragraph (which was always None)
                     print(f"  [EXTRACTOR.extract_schedule_info] Calling build_extraction_prompt_json with text and flags...")
-                    prompt_dict_s  = self._prompt_creation.build_extraction_prompt_json(drug_names)
+                    prompt_dict_s  = self._prompt_creation.build_extraction_prompt_json(sample_codes)
                     print(f"  [EXTRACTOR.extract_schedule_info] prompt_dict keys: {list(prompt_dict_s.keys())}")
                 else:
                     # If you have a schema path, handle it here
@@ -282,15 +299,32 @@ class NanoparticlesExtractorParagraph(BaseModel):
         print(response)
 
         registry = self._nanoparticles_parser.parse_formulation_registry(response)
+        registry = self.normalise_cargo_names(registry)   # <-- NOVO
+        registry = inherit_cargo(registry) 
         print(f"  [EXTRACTOR.extract_formulation_registry] Registry: {registry}")
         return registry
+
+    def normalise_cargo_names(self, registry: dict) -> dict:
+        for code, info in registry.items():
+            names = []
+            for n in info.get("therapeutic_molecule", []):
+                for pat, canonical in COMPILED_MAP:
+                    if pat.fullmatch(n.strip()):
+                        n = canonical
+                        break
+                names.append(n)
+            info["therapeutic_molecule"] = names
+        return registry
+
+
 
     def check_cargo(self, data_response: dict) -> dict:
         """For each candidate cargo name: try CARGO_DB first, fall back to LLM classification."""
         cargo_candidates = []
 
         for formulation in data_response["formulations"].values():
-            cargo_candidates.extend(formulation.get("drug_name", []))
+            print(f'formulation is{formulation}')
+            cargo_candidates.extend(formulation.get("therapeutic molecule", []))
 
         cargo_candidates = list(dict.fromkeys(cargo_candidates)) #remover duplicados
 
@@ -298,6 +332,8 @@ class NanoparticlesExtractorParagraph(BaseModel):
         unmatched = []
 
         for name in cargo_candidates:
+            if NON_CARGO_RX.search(name):
+                continue 
             category = lookup_cargo_category(name) #procurar a categoria no meu dicionario
             if category:
                 resolved[name] = {"is_drug": True, "category": category, "source": "CARGO_DB"}

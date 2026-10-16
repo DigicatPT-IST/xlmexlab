@@ -519,10 +519,10 @@ class PromptCreationFormulationRegistry(BaseModel):
         )
         
         schema_lines = [
-        "Format: <sample_code> | <drug_name_or_none> | <loaded/unloaded/unknown>",
+        "Format: <sample_code> | <therapeutic_molecule_or_none> | <loaded/unloaded/unknown>",
         "Rules:",
-        "- The cargo is ONLY the active therapeutic/bioactive molecule that is ENCAPSULATED or "
-        "LOADED into the particle (drug, nucleic acid, protein, imaging agent).",
+        "- The therapeutic molecule/ cargo is ONLY the active therapeutic/bioactive molecule that is ENCAPSULATED or "
+        "LOADED into the particle (drug, nucleic acid, protein).",
         "- The following are NEVER cargo: polymers (PLGA, PLA, PEG), polymer conjugates "
         "(e.g. L-leucine-PLGA conjugate), lipids, surfactants (Poloxamer, Tween), solvents, "
         "buffers, cryoprotectants (mannitol), and any material described as replacing or "

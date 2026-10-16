@@ -426,7 +426,7 @@ class ParserNanoparticle(BaseModel):
                 "organ": organ,
                 "percent": percent,
                 "unit": item.get("unit"),
-                "sample_code": item.get("drug_namre"),
+                "sample_code": item.get("sample_code"),
 
             })
         processed = sorted(
@@ -840,7 +840,7 @@ class ParserNanoparticle(BaseModel):
                 sample_codes=[sample_code]
 
             registry[code.upper()] = {
-                "sample_code": sample_codes,
+                "therapeutic_molecule": sample_codes,
                 "load": load if load in ("loaded", "unloaded") else None,
             }
 
