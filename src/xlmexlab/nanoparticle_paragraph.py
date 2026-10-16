@@ -2216,9 +2216,9 @@ class NanoparticleExtractor(BaseModel):
                 #return "In vitro generic keyword"
 
     def _extract_immune_status(self, text: str) -> Optional[str]:
-        if _abr_first_keyword_match(text, IMMUNOCOMPROMISED_KEYWORDS, IMMUNOCOMPROMISED_ABBR) or self._cell_line_in_vivo(text, XENOGRAFT_CELL_LINES):
+        if _abr_first_keyword_match(text, IMMUNOCOMPROMISED_KEYWORDS, IMMUNOCOMPROMISED_ABBR) or _cell_line_in_vivo(text, XENOGRAFT_CELL_LINES):
             return "Immunocompromised"
-        if _first_keyword_match(text, IMMUNOCOMPETENT_KEYWORDS) or self._cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES):
+        if _first_keyword_match(text, IMMUNOCOMPETENT_KEYWORDS) or _cell_line_in_vivo(text, ALLOGRAFT_CELL_LINES):
             return "Immunocompetent"
         return None
 
