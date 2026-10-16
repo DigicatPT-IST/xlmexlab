@@ -2181,7 +2181,7 @@ class NanoparticleExtractor(BaseModel):
 
     # BIOLOGICAL CONTEXT
 
-    def _cell_line_in_vivo(text: str, cell_lines: List[str]) -> bool:
+    def _cell_line_in_vivo(self, text: str, cell_lines: List[str]) -> bool:
         for sentence in _split_sentences(text):
             if not _match_abbreviation(sentence, cell_lines):
                 continue
