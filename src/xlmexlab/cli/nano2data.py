@@ -16,28 +16,16 @@ from xlmexlab.prompt import TEMPLATE_REGISTRY
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-TERMINAL_RX = re.compile(r'[.!?]["”’)\]]*\s*$')           # ends a sentence
-CONTINUATION_START_RX = re.compile(r'^\s*(?:\d[\d.,]*\s*)?[a-z]')  # lowercase, or number + lowercase
+TERMINAL_RX = re.compile(r'[.!?]["”’)\]]*\s*$')   # ends a sentence
 
 
 def _is_unfinished(text: str) -> bool:
     return bool(text.strip()) and not TERMINAL_RX.search(text.strip())
 
 
-def _is_continuation(text: str) -> bool:
-    return bool(CONTINUATION_START_RX.match(text))
-
-
 def merge_split_paragraphs(blocks: list) -> list:
-    """
-    Merge paragraphs broken by a column/page break:
-      - previous paragraph does not end with . ! ?  (closing quotes/brackets allowed)
-      - next paragraph starts with lowercase, or number + lowercase
-    The merged block keeps the first block's page/box; the other boxes are stored
-    in "continuation_boxes" so the PDF annotator can highlight them too.
-    """
     merged = []
-    last_par = None  # last paragraph block kept (reset at section headers)
+    last_par = None
 
     for block in blocks:
         btype = block.get("type")
@@ -52,25 +40,21 @@ def merge_split_paragraphs(blocks: list) -> list:
             continue
 
         content = block.get("content", "")
-        if not content.strip():          # existing empty continuation boxes: leave untouched
+        if not content.strip():
             merged.append(block)
             continue
 
-        if (last_par is not None
-                and _is_unfinished(last_par["content"])
-                and _is_continuation(content)):
+        if last_par is not None and _is_unfinished(last_par["content"]):
             prev = last_par["content"].rstrip()
             nxt = content.lstrip()
-            # "ANNV-" + "450 ..." -> "ANNV-450 ..." ; otherwise join with a space
             last_par["content"] = prev + nxt if prev.endswith("-") else prev + " " + nxt
             last_par.setdefault("continuation_boxes", []).append(
                 {"page": block.get("page"), "box": block.get("box")}
             )
-            print(f"MERGED split paragraph (p{last_par.get('page')} + p{block.get('page')}): "
-                  f"...{prev[-40:]} | {nxt[:40]}...")
+            print(f"MERGED split paragraph (p{last_par.get('page')} + p{block.get('page')})")
             continue
 
-        block = dict(block)              # don't mutate the input
+        block = dict(block)
         merged.append(block)
         last_par = block
 
