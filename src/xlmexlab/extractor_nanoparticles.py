@@ -324,7 +324,7 @@ class NanoparticlesExtractorParagraph(BaseModel):
 
         for formulation in data_response["formulations"].values():
             print(f'formulation is{formulation}')
-            cargo_candidates.extend(formulation.get("therapeutic molecule", []))
+            cargo_candidates.extend(formulation.get("therapeutic_molecule", []))
 
         cargo_candidates = list(dict.fromkeys(cargo_candidates)) #remover duplicados
 

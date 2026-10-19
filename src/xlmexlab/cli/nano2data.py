@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import logging
 from dataclasses import asdict, is_dataclass
@@ -15,6 +16,65 @@ from xlmexlab.prompt import TEMPLATE_REGISTRY
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+TERMINAL_RX = re.compile(r'[.!?]["”’)\]]*\s*$')           # ends a sentence
+CONTINUATION_START_RX = re.compile(r'^\s*(?:\d[\d.,]*\s*)?[a-z]')  # lowercase, or number + lowercase
+
+
+def _is_unfinished(text: str) -> bool:
+    return bool(text.strip()) and not TERMINAL_RX.search(text.strip())
+
+
+def _is_continuation(text: str) -> bool:
+    return bool(CONTINUATION_START_RX.match(text))
+
+
+def merge_split_paragraphs(blocks: list) -> list:
+    """
+    Merge paragraphs broken by a column/page break:
+      - previous paragraph does not end with . ! ?  (closing quotes/brackets allowed)
+      - next paragraph starts with lowercase, or number + lowercase
+    The merged block keeps the first block's page/box; the other boxes are stored
+    in "continuation_boxes" so the PDF annotator can highlight them too.
+    """
+    merged = []
+    last_par = None  # last paragraph block kept (reset at section headers)
+
+    for block in blocks:
+        btype = block.get("type")
+
+        if btype == "section_header":
+            last_par = None
+            merged.append(block)
+            continue
+
+        if btype != "paragraph":
+            merged.append(block)
+            continue
+
+        content = block.get("content", "")
+        if not content.strip():          # existing empty continuation boxes: leave untouched
+            merged.append(block)
+            continue
+
+        if (last_par is not None
+                and _is_unfinished(last_par["content"])
+                and _is_continuation(content)):
+            prev = last_par["content"].rstrip()
+            nxt = content.lstrip()
+            # "ANNV-" + "450 ..." -> "ANNV-450 ..." ; otherwise join with a space
+            last_par["content"] = prev + nxt if prev.endswith("-") else prev + " " + nxt
+            last_par.setdefault("continuation_boxes", []).append(
+                {"page": block.get("page"), "box": block.get("box")}
+            )
+            print(f"MERGED split paragraph (p{last_par.get('page')} + p{block.get('page')}): "
+                  f"...{prev[-40:]} | {nxt[:40]}...")
+            continue
+
+        block = dict(block)              # don't mutate the input
+        merged.append(block)
+        last_par = block
+
+    return merged
 
 def load_blocks(json_path: str) -> list:
     with open(json_path, "r", encoding="utf-8") as f:
@@ -85,7 +145,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
         block_type = block.get("type")
         content = block.get("content", "").strip()
 
-        # --- Headers ---
+        #  Headers 
         if block_type == "section_header":
             print(f"\n[BLOCK {block_index}] HEADER: '{content[:80]}...'")
             results.append({
@@ -109,7 +169,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
         print(f"  TEXT PREVIEW: '{content[:120]}...'")
 
         try:
-            # --- Step 1: Regex extraction ---
+            # Step 1: Regex extraction
             print(f"\n  [STEP 1] Running REGEX extractor...")
             regex_flags = to_dict(regex_extractor.extract(content))
 
@@ -168,7 +228,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
 
                 print(regex_flags.get("formulations"))
                 if regex_flags.get("formulations"):
-                    print("\n  [STEP FORMULATION] Running fornulations detection...")
+                    print("\n  [STEP FORMULATION] Running formulations detection...")
                     try:
                         updated_formulations = llm_extractor.extract_formulation_registry(text=content, data_response=regex_flags)
                         regex_flags["formulations"] = updated_formulations
@@ -177,7 +237,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
                         traceback.print_exc()
 
                 if regex_flags.get("formulations"):
-                    print("\n  [STEP CARGOS] Running fornulations detection...")
+                    print("\n  [STEP CARGOS] Running formulations detection...")
                     try:
                         add_cargos_by_llm = llm_extractor.check_cargo(data_response=regex_flags)
                         regex_flags["cargos LLM"] = add_cargos_by_llm
@@ -207,12 +267,12 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
                 llm_extractor._extracted_flags = regex_flags
 
                 try:
-                    # --- First extraction ---
+                    # First extraction 
                     llm_values = llm_extractor.extract_text_info(content)
 
                     print(f"  [STEP 3] LLM returned: {llm_values}")
 
-                    # --- Second extraction: schedule info ---
+                    # Second extraction: schedule info 
                     schedule_values = None
 
                     if llm_values and llm_values.get("dose_group"):
@@ -246,7 +306,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
                     traceback.print_exc()
                     llm_values = None
 
-            # --- Step 3: Merge ---
+            # Step 3: Merge 
             extraction = {**regex_flags, **(llm_values or {})}
             print(f"\n  [MERGE] Final extraction keys with non-null values: "
                   f"{[k for k, v in extraction.items() if v is not None and v is not False and v != []]}")
@@ -255,6 +315,7 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
                 "type": "paragraph",
                 "page": block.get("page"),
                 "text": content,
+                "continuation_boxes": block.get("continuation_boxes", []),
                 "extraction": extraction,
             })
 
@@ -303,12 +364,12 @@ def nanoparticles2data(
     blocks = load_blocks(paragraph_json)
     print(f"  Loaded {len(blocks)} blocks total.")
 
-    # --- Regex extractor ---
+    # Regex extractor 
     print("\nLOADING REGEX EXTRACTOR...")
     regex_extractor = NanoparticleExtractor()
     print("  Regex extractor ready.")
 
-    # --- LLM extractor ---
+    # LLM extractor 
     llm_extractor = None
     if skip_llm:
         print("\nLLM EXTRACTOR: skipped (--skip_llm flag)")
@@ -332,9 +393,10 @@ def nanoparticles2data(
             traceback.print_exc()
             logger.warning(f"LLM disabled: {e}")
 
-    # --- Process ---
+    # Process 
     print("\nSTARTING BLOCK PROCESSING...")
     results, error_count = process_blocks(
+        blocks=merge_split_paragraphs(remove_sections(blocks)),
         blocks=remove_sections(blocks),
         regex_extractor=regex_extractor,
         llm_extractor=llm_extractor,
@@ -342,7 +404,7 @@ def nanoparticles2data(
         skip_llm=skip_llm,
     )
 
-    # --- Save ---
+    # Save
     output = {
         "source": {
             "file": os.path.abspath(paragraph_json),

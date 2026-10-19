@@ -299,6 +299,17 @@ NON_LIPIDS = {
 }
 
 
+MOUSE_KG = 0.030
+TO_MG = {"µg": 1e-3, "ug": 1e-3, "mg": 1.0, "g": 1e3, "kg": 1e6}
+
+
+VOLUME_DENOM_RX = re.compile(r"/\s*(?:[mµμu]?l|dl|cm3|cm³)\b", re.I)
+
+def _is_concentration(unit: str) -> bool:
+    u = (unit or "").strip().replace("μ", "µ")
+    return bool(VOLUME_DENOM_RX.search(u))
+
+
 class ParserNanoparticle(BaseModel):
     _parameters: List[str] = PrivateAttr(default_factory=list)
 
@@ -506,47 +517,30 @@ class ParserNanoparticle(BaseModel):
 
     def postprocess_dose_group(self, entries: list[dict]) -> list[dict]:
         processed = []
-
-        # unidades a ignorar
-        skip_units = {"", "l", "/l", "/ml"}
-
         for item in entries:
-            unit = item.get("unit")
+            unit = (item.get("unit") or "").replace("μ", "µ").strip()
             value = item.get("value")
 
-            if unit == "µg":
-                try:
-                    value = str(float(value)/ 30)
-                    unit = "mg/kg"
-                except (TypeError, ValueError):
-                    pass
-            
-            if unit == "g":
-                try:
-                    value = str(float(value) / 0.03)
-                    unit = "mg/kg"
-                except (TypeError, ValueError):
-                    pass
-
-            if unit == "kg":
-                try:
-                    value = str(float(value) / 0.000030)
-                    unit = "mg/kg"
-                except (TypeError, ValueError):
-                    pass
-
-            # remover entradas com unidades inválidas/associadas a volume
-            normalized_unit = str(unit).strip().lower() if unit is not None else ""
-            if normalized_unit in skip_units:
+            if not unit or _is_concentration(unit):
                 continue
+
+            converted = False
+            if unit in TO_MG:
+                try:
+                    value = f"{float(value) * TO_MG[unit] / MOUSE_KG:.4g}"
+                    unit, converted = "mg/kg", True
+                except (TypeError, ValueError):
+                    pass
 
             processed.append({
                 "value": value,
                 "unit": unit,
                 "therapeutic_molecule": item.get("therapeutic_molecule"),
                 "sample_code": item.get("sample_code"),
+                "converted": converted,
+                "original_value": item.get("value") if converted else None,
+                "original_unit": item.get("unit") if converted else None,
             })
-
         return processed
         
     def compute_charge_group(self, entries: list[dict]) -> str | None:

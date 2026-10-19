@@ -781,14 +781,14 @@ LIPID_KEYWORDS = [
     "MSPC", "monostearoyl phosphatidylcholine", "SPC", "DPPC", "DSPC", "DOPC", "DOPE", "HSPC", "hydrogenated soy phosphatidylcholine", "DPPE", "DMPC", "POPC", "POPE",
     "phosphatidylcholine", "sphingomyelin", "span 60", "SM", "lyso-PC", "lyso-PE",
 
-    "span", "twen"
+    "span", "twen",
 
     # sterols
     "cholesterol hemisuccinate", "CHEMS", "cholesterol", "chol", "CHO", "CHOL", "choles-terol", "beta-sitosterol", "ergosterol",
 
     # PEG-lipids
     "DSPE-PEG", "DSPE-PEG2000", "DSPE-MPEG2000", "DSPE- PEG2000", "DSPE-PEG_2000", "DSPE- PEG_2000", "DSPE- MPEG2000", "DSPE- MPEG" , "DSPE- PEG",
-    "C14-PEG2000","C14- PEG2000", "PEG-DMG", "PEG- DMG", "PEG2000-Cer16", "PEG-DSPE", "PEG-DMPE", "PED-DPPE", "mPEG2000-DSPE", "mPEG2000 DSPE"
+    "C14-PEG2000","C14- PEG2000", "PEG-DMG", "PEG- DMG", "PEG2000-Cer16", "PEG-DSPE", "PEG-DMPE", "PED-DPPE", "mPEG2000-DSPE", "mPEG2000 DSPE",
 
     # ionizable lipids
     "DLin-MC3-DMA", "MC3", "SM-102", "ALC-0315",
@@ -840,7 +840,13 @@ STIMULUS_MAP = {
     "Light-triggered":       ["light-triggered", "photo-responsive", "photosensitive", "NIR-responsive", "azobenzene"],
     "Hypoxia-responsive":    ["hypoxia-responsive", "hypoxia-triggered", "nitroimidazole", "azobenzene hypoxia"],
 }
- 
+
+FUNC_GROUPS = r"(?:-(?:COOH|NH2|maleimide|mal|biotin|folate|FA|OMe|SH|N3|azide|NHS))?"
+pattern = r"\b(" + "|".join(map(re.escape, LIPID_KEYWORDS)) + r")" + FUNC_GROUPS + r"\b"
+
+
+
+
 # bioconjugation
 COVALENT_KEYWORDS     = ["covalent", "crosslinked", "thioether", "amide bond", "maleimide", "click chemistry",
                           "NHS ester", "EDC coupling", "disulfide conjugation", "mannose-modified" ]
@@ -1943,21 +1949,17 @@ class NanoparticleExtractor(BaseModel):
         if passive:
             return "passive"
         return None
+
+    
     def _extract_lipid_composition(self, text: str) -> Optional[List[str]]:
-        pattern = r"\b(" + "|".join(map(re.escape, LIPID_KEYWORDS)) + r")\b"
+        NORM_LOWER = {k.lower(): v for k, v in NORMALIZATION_MAP.items()}
+
+        text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2212]", "-", text)
+        pattern = r"\b(" + "|".join(map(re.escape, LIPID_KEYWORDS)) + r")" + FUNC_GROUPS + r"\b"
         matches = [m.group(0) for m in re.finditer(pattern, text, re.IGNORECASE)]
 
-        normalized = []
-        for m in matches:
-            m.lower()
-            if m in NORMALIZATION_MAP:
-                normalized.append(NORMALIZATION_MAP[m])
-            else:
-                normalized.append(m)
-
-        seen = dict.fromkeys(normalized)
-        normalized = list(seen)
-
+        normalized = [NORM_LOWER.get(m.lower(), m) for m in matches]
+        normalized = list(dict.fromkeys(normalized))
 
         for generic, specific_set in GENERIC_TERMS.items():
             if generic in normalized and any(spec in normalized for spec in specific_set):
