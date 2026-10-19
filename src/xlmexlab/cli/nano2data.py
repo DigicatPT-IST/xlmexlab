@@ -397,7 +397,6 @@ def nanoparticles2data(
     print("\nSTARTING BLOCK PROCESSING...")
     results, error_count = process_blocks(
         blocks=merge_split_paragraphs(remove_sections(blocks)),
-        blocks=remove_sections(blocks),
         regex_extractor=regex_extractor,
         llm_extractor=llm_extractor,
         min_text_length=min_text_length,
