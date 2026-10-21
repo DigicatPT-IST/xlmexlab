@@ -24,6 +24,16 @@ NON_CARGO_RX = re.compile(
     r"leucine[-\s]?PLGA|polymer|lipid|surfactant)\b", re.I
 )
 
+
+def build_alias_hints(candidates):
+    hints = {}
+    for code in candidates:
+        for token in re.split(r"[-_@*\s]+", code):          # "DTX-CLs" -> DTX, CLs
+            for pat, canonical in COMPILED_MAP:
+                if pat.fullmatch(token):
+                    hints[token] = canonical
+    return hints
+
 def inherit_cargo(registry: dict) -> dict:
     for code, info in registry.items():
         if info.get("therapeutic_molecule"):
@@ -286,7 +296,9 @@ class NanoparticlesExtractorParagraph(BaseModel):
         if not candidates:
             return {}
 
-        prompt_dict = PromptCreationFormulationRegistry().build_extraction_prompt_json(candidates)
+        known_aliases = build_alias_hints(candidates)
+
+        prompt_dict = PromptCreationFormulationRegistry().build_extraction_prompt_json(candidates, known_aliases)
         self._prompt = PromptFormatter(**prompt_dict)
         self._prompt.model_post_init(self.prompt_template_path)
 

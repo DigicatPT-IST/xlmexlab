@@ -1111,7 +1111,7 @@ INOCULATION_RX = re.compile(
     r"\bcells?\b|\d\s*[×x]\s*10\s*\^?\s*\d|cells\s*/\s*(?:mouse|animal)", re.I
 )
 DRUG_CONTEXT_RX = re.compile(
-    r"mg\s*/\s*kg|[µμu]g|nanoparticle|liposom|LNP|formulation|drug|dose|PBS control", re.I
+    r"mg\s*/\s*kg|[µμu]g|nanoparticle|liposom|LNP|formulation|drug|dose|PBS control|concentration", re.I
 )
 
 
@@ -1830,13 +1830,16 @@ def _extract_value_unit_closest_to_keyword(
 
     # BIOLOGICAL CONTEXT
 
+@staticmethod
 def _cell_line_in_vivo(text: str, cell_lines: List[str]) -> bool:
-        for sentence in _split_sentences(text):
-            if not _match_abbreviation(sentence, cell_lines):
-                continue
-            if INVIVO_CONTEXT_RX.search(sentence):
-                return True
-        return False
+    for sentence in _split_sentences(text):
+        if not _match_abbreviation(sentence, cell_lines):
+            continue
+        if INVITRO_CONTEXT_RX.search(sentence):
+            continue                      # "in vitro ... cell lines" -> not an animal model
+        if INVIVO_CONTEXT_RX.search(sentence):
+            return True
+    return False
 
 
 class NanoparticleExtractor(BaseModel):
@@ -2064,24 +2067,36 @@ class NanoparticleExtractor(BaseModel):
             return "Therapy"
         return None
 
-        
+            
+    def _route_window(self, sentence: str, rules: dict, radius: int = 100) -> str:
+        """Text around the route keyword/abbreviation, so unrelated clauses don't leak in."""
+        for kw in rules["words"] + rules["abbr"]:
+            m = re.search(r"(?<![A-Za-z0-9])" + re.escape(kw) + r"(?![A-Za-z0-9])", sentence, re.I)
+            if m:
+                return sentence[max(0, m.start() - radius): m.end() + radius]
+        return sentence
+
+
     def _route_sentence_is_valid(self, sentence: str, rules: dict) -> bool:
-        """Guards applied AFTER _abr_first_keyword_match already said True."""
         words_hit = _word_sufix_keyword_match(sentence, rules["words"])
 
         if not words_hit:
-            # matched only through an abbreviation
             dotted = [a for a in rules["abbr"] if "." in a]
             dotted_hit = bool(dotted) and _match_abbreviation(sentence, dotted)
-
-            if not dotted_hit:  # risky undotted abbr: IV, IT, ID, IA, IP, PO, SC, SQ
+            if not dotted_hit:
                 if _is_excluded(sentence, ROUTE_FALSE_POSITIVE_CONTEXT):
-                    return False                       # "stage IV breast cancer"
+                    return False
                 if not ROUTE_ADMIN_CONTEXT_RX.search(sentence):
-                    return False                       # "the IT department", "sample ID"
+                    return False
 
-        # tumour inoculation is not the treatment route
-        if INOCULATION_RX.search(sentence) and not DRUG_CONTEXT_RX.search(sentence):
+        window = self._route_window(sentence, rules)
+
+        # tumour inoculation: cells near the route word, and no strong drug evidence nearby
+        has_cells = INOCULATION_RX.search(window) or _match_abbreviation(
+            window, XENOGRAFT_CELL_LINES + ALLOGRAFT_CELL_LINES
+        ) and re.search(r"\bcells?\b", window, re.I)
+
+        if has_cells and not DRUG_CONTEXT_RX.search(window):
             return False
 
         return True

@@ -578,7 +578,7 @@ class ParserNanoparticle(BaseModel):
             unit = item.get("unit", "")
 
             # Exclude values measured in grams
-            if unit.strip().lower() == "g":
+            if unit is not None and unit.strip().lower() == "g":
                 continue
 
             processed.append(item)

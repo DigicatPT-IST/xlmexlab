@@ -498,55 +498,57 @@ class PromptCreationLipidRatioUnits(BaseModel):
             "answer_schema": {"Format": "\n".join(schema_lines)},
             "conclusion": "Return ONLY the extraction line using the given format. No explanations, headers, or comments.",
         }
-    
+
+
 class PromptCreationFormulationRegistry(BaseModel):
 
-    def build_extraction_prompt_json(self, candidate_codes: list[str]) -> dict:
-        expertise = (
-            "You are an expert assistant for identifying the correct "
-            "sample codes (nanoparticles names)."
-        )
-        initialization = (
-            "A first-pass scan found these candidate sample codes "
-            "in the text below:\n" + ", ".join(candidate_codes)
-        )
+    def build_extraction_prompt_json(
+        self,
+        candidate_codes: list[str],
+        known_aliases: dict[str, str] | None = None,   # e.g. {"DTX": "Docetaxel", "GEM": "Gemcitabine"}
+    ) -> dict:
+        expertise = "You are an expert assistant for identifying nanoparticle sample codes and their cargo."
+
+        init = "Candidate sample codes found by a first-pass scan: " + ", ".join(candidate_codes)
+        if known_aliases:
+            init += (
+                "\nKnown abbreviation dictionary (the ONLY allowed abbreviation expansions): "
+                + "; ".join(f"{k} = {v}" for k, v in known_aliases.items())
+            )
+
         objective = (
-            "For each REAL sample code (i.e. one that genuinely refers to a "
-            "specific nanoparticle/liposome sample code in this text), determine: "
-            "(1) the cargo (therapeutic molecule) it contains, if any, and "
-            "(2) whether it is explicitly described as loaded or unloaded/blank. "
-            "Only use information explicitly stated in the text."
+            "For each candidate that is a real nanoparticle/liposome sample code, report its cargo "
+            "and whether it is loaded or unloaded, using ONLY what the text or the dictionary states."
         )
-        
+
         schema_lines = [
-        "Format: <sample_code> | <therapeutic_molecule_or_none> | <loaded/unloaded/unknown>",
-        "Rules:",
-        "- The therapeutic molecule/ cargo is ONLY the active therapeutic/bioactive molecule that is ENCAPSULATED or "
-        "LOADED into the particle (drug, nucleic acid, protein).",
-        "- The following are NEVER cargo: polymers (PLGA, PLA, PEG), polymer conjugates "
-        "(e.g. L-leucine-PLGA conjugate), lipids, surfactants (Poloxamer, Tween), solvents, "
-        "buffers, cryoprotectants (mannitol), and any material described as replacing or "
-        "substituting another component ('instead of', 'in place of').",
-        "- If a formulation is described as prepared by 'the same procedure' or 'same method' "
-        "as another formulation, it contains the SAME cargo as that formulation, "
-        "unless a different drug is explicitly stated.",
-        "- Expand abbreviations to the full drug name when the text defines them or when the "
-        "same text mentions the drug by full name (e.g. BN = betulin).",
-        "- If a candidate is NOT a sample-code identifier (method name, unit, abbreviation), SKIP it.",
-        "- Use 'none' for drug_name if no cargo is stated.",
-        "- Use 'unknown' for load status only if the text does not state it.",
-        "- One line per valid sample code.",
-        "- If no valid sample code remains, answer exactly: none",
+            "Format: <sample_code> | <cargo> | <loaded/unloaded/unknown>",
+            "Rules:",
+            "- <cargo> = the active drug, nucleic acid or protein encapsulated/loaded in the particle.",
+            "- <cargo> must be written in the text, or come from the abbreviation dictionary above. "
+            "NEVER expand an abbreviation from your own knowledge.",
+            "- If the cargo is not explicitly stated or in the dictionary, write: not_extractable",
+            "- If the text says the particle has no cargo (blank/empty), write: none",
+            "- Polymers (e.g. PLGA, PLA, PEG), lipids, surfactants (Poloxamer, Tween), solvents, buffers, cryoprotectants and replaced "
+            "components are NEVER cargo.",
+            "- Use 'unknown' for load status when the text does not state it.",
+            "- Skip candidates that are not sample codes (methods, units, generic abbreviations).",
+            "- One line per sample code. If none are valid, answer exactly: none",
+            "Example:",
+            "  Text: '...X-CLs were prepared... ' with no definition of X",
+            "  Output: X-CLs | not_extractable | unknown",
         ]
+
         return {
             "expertise": expertise,
-            "initialization": initialization,
+            "initialization": init,
             "definitions": {},
             "objective": objective,
             "answer_schema": {"Format": "\n".join(schema_lines)},
-            "conclusion": "Return ONLY the extraction lines. Do not add any explanations, headers, or comments.",
+            "conclusion": "Return ONLY the lines. No explanations.",
         }
-    
+
+
 class PromptCreationCargoCategoryCheck(BaseModel):
 
     def build_extraction_prompt_json(self, unmatched_cargos: list[str], known_categories: list[str]) -> dict:
