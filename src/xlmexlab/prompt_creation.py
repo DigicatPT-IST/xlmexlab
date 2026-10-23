@@ -54,12 +54,36 @@ PARAM_META: dict[str, dict] = {
         "description": "Bioconjugation nature",
         "unit_hint": "-",
         "specific_format": "bioconjugation_nature | <nature> | <sample_code>",
-        "field_rules": {
-            "<nature>": "If its refered if the bioconjagation nature is elestrostatic or covalent. ",
-            "<sample_code>": (
-                "Identify the sample code (nanoparticle name) associated to the reported nature."
-                "If no sample code name is specified, write 'not extractable'."
-            ),
+    "field_rules": {
+        "<nature>": (
+            "Exactly one of: covalent, electrostatic, non-covalent. "
+            "Use 'covalent' when the text names a covalent bond or coupling chemistry "
+            "(e.g. covalently attached, maleimide-thiol, thioether, NHS/EDC amide coupling, "
+            "click chemistry, disulfide linkage). "
+            "Use 'electrostatic' when attachment relies on opposite charges "
+            "(e.g. electrostatically adsorbed/bound, layer-by-layer, polyelectrolyte coating, ionic complexation). "
+            "Use 'non-covalent' for other physical attachment that is not charge-based "
+            "(e.g. biotin-streptavidin binding, hydrophobic insertion, physical adsorption)."
+        ),
+        "<sample_code>": (
+            "Name of the nanoparticle that carries the attached molecule, exactly as written in the text. "
+            "If the text gives no name, write 'not extractable'."
+        ),
+    },
+    "extra_rules": [
+        "Extract ONLY if the text states HOW the molecule is attached (the bond, the chemistry or the interaction).",
+        "Words such as 'modified', 'functionalized', 'decorated', 'targeted' or 'coated' alone are NOT enough. "
+        "Do not guess the nature from the molecule's name (folate, transferrin, antibody...).",
+        "One line per different nature/sample_code pair. Do not repeat identical lines.",
+        "The examples below only show the format. Never copy their names or values.",
+    ],
+    "exclude": [
+        "electrostatic repulsion or colloidal stability (e.g. 'electrostatic repulsion keeps the particles stable')",
+        "self-assembly of lipids or polymers into vesicles",
+        "drug or nucleic acid encapsulation/loading into the particle",
+        "PEG-lipids simply mixed into the lipid film (no attachment chemistry described)",
+        "the word 'non-covalent' must never be labelled 'covalent'",
+    ],
     },
         "exclude": [
             "theoretical sizes",

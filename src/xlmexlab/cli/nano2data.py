@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_RX = re.compile(r'[.!?]["”’)\]]*\s*$')   # ends a sentence
 
+CITE_RX = re.compile(r"\(\s*\d+(?:\s*[,–-]\s*\d+)*\s*\)|\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]")
+OWN_RX = re.compile(
+    r"\b(?:we|our)\b"
+    r"|\b(?:was|were)\s+(?:prepared|administered|injected|incubated|treated|measured|"
+    r"loaded|synthesi[sz]ed|dissolved|added|dosed)\b"
+    r"|\bmice\b|\bmg\s*/\s*kg\b|\bTable\s+\d|\bFig(?:ure|\.)\s*\d", re.I)
+BODY_HEADERS = ("method", "material", "experimental", "result")
+
+
 
 def _is_unfinished(text: str) -> bool:
     return bool(text.strip()) and not TERMINAL_RX.search(text.strip())
@@ -117,10 +126,33 @@ def remove_sections(blocks):
 
         filtered_blocks.append(block)
 
-    return filtered_blocks
+    return filtered_blocks, inside_removed_section
 
+def mark_background(blocks, intro_removed):
+    """Índices (na lista já filtrada) dos parágrafos a marcar como background."""
+    if intro_removed:
+        return set()
+    par_idx = [i for i, b in enumerate(blocks) if b.get("type") == "paragraph"]
+    if not par_idx:
+        return set()
 
-def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip_llm):
+    last_in_first_third = par_idx[max(1, len(par_idx) // 3) - 1]
+    first_body_header = next(
+        (i for i, b in enumerate(blocks)
+         if b.get("type") == "section_header"
+         and any(k in b.get("content", "").lower() for k in BODY_HEADERS)),
+        len(blocks),
+    )
+    cutoff = min(last_in_first_third, first_body_header)
+
+    return {
+        i for i in par_idx
+        if i <= cutoff
+        and CITE_RX.search(blocks[i].get("content", ""))
+        and not OWN_RX.search(blocks[i].get("content", ""))
+    }
+
+def process_blocks(blocks, background_ids, regex_extractor, llm_extractor, min_text_length, skip_llm):
     results = []
     errors = 0
     paragraph_index = 0
@@ -145,6 +177,17 @@ def process_blocks(blocks, regex_extractor, llm_extractor, min_text_length, skip
 
         if len(content) < min_text_length:
             print(f"\n[BLOCK {block_index}] SKIPPING paragraph too short ({len(content)} chars < {min_text_length})")
+            continue
+
+        if block_index in background_ids:
+            print(f"\n[BLOCK {block_index}] BACKGROUND paragraph, skipping extraction.")
+            results.append({
+                "type": "paragraph",
+                "page": block.get("page"),
+                "text": content,
+                "extraction": {},
+                "background": True,
+            })
             continue
 
         paragraph_index += 1
@@ -379,8 +422,12 @@ def nanoparticles2data(
 
     # Process 
     print("\nSTARTING BLOCK PROCESSING...")
+    pre_blocks, intro_removed = remove_sections(blocks)
+    background_ids = mark_background(blocks, intro_removed)
+
     results, error_count = process_blocks(
-        blocks=merge_split_paragraphs(remove_sections(blocks)),
+        blocks=merge_split_paragraphs(pre_blocks),
+        background_ids = background_ids,
         regex_extractor=regex_extractor,
         llm_extractor=llm_extractor,
         min_text_length=min_text_length,
