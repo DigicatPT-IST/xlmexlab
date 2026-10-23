@@ -1,9 +1,0 @@
-{
-  "expertise": "You are an helpful chemistry assistant.",
-  "initialization": "Take your time and give your answer as truthfully as possible using the provided context.",
-  "objective":"Write the full preparation procedures of each sample presented in the following paragraph indicating the yield when possible:",
-  "actions": {},
-  "answer_schema": {"Initialization": "Give your answer as a dictionary in the following format:",
-                    "schema": "{'name': write the sample name; 'preparation': write the preparation procedure, 'yield': write the yield of the procedure}"},
-  "conclusion":  "Do not mention alterations to the first procedure. Every time that there is a change in the preparation conditions a new sample should be considered. Do not mention samples that do not contain their preparation procedure inside the paragraph even if they are mentioned. If there are more than 8 procedures, combine the conditions into ranges"
-}

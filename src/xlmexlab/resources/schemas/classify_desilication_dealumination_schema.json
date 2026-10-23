@@ -1,0 +1,10 @@
+{
+  "expertise": "You are an expert in material preparation.",
+  "initialization": "Answer the questions as truthfully as possible. Answer No if you are unsure.",
+  "objective":"Analyse the following paragraph:",
+  "definitions": {"Initialization" : "To answer the question consider the following description of desilication and dealumination",
+              "Desilication" : "Alkaline treatment used to remove silicium (Si) from the materials's structure using a base solution such as NaOH, TPAOH, TBAOH, etc...;",
+              "Dealumination" : "Acid treatment used to remove Aluminium (Al) from the materials's structure using an acid solution such as nitric acid, oxalic acid, etc...;"},
+  "answer_schema": {},
+  "conclusion":  "Does this paragraph contains information on how to perform the desilication or dealimunation of a material with the operating conditions? Answer yes or no with no justification."
+}

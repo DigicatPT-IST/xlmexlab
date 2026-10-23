@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from zs4procext.actions import (
+from xlmexlab.actions import (
     ActionsWithchemicals,
     Chemical,
     CollectLayer,
@@ -9,7 +9,7 @@ from zs4procext.actions import (
     MakeSolution,
     Stir,
 )
-from zs4procext.parser import ParametersParser, SchemaParser
+from xlmexlab.parser import ParametersParser, SchemaParser
 
 
 def test_filter_raises_for_invalid_phase():

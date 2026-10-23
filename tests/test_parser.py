@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from zs4procext.parser import ActionsParser, Conditions, ParametersParser, SchemaParser
+from xlmexlab.parser import ActionsParser, Conditions, ParametersParser, SchemaParser
 
 
 def test_action_parser():
