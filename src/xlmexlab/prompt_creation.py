@@ -49,7 +49,6 @@ PARAM_META: dict[str, dict] = {
             "instrument limits",
         ],
     },
-
     "bioconjugation_nature": {
         "description": "Bioconjugation nature",
         "unit_hint": "-",
@@ -85,15 +84,6 @@ PARAM_META: dict[str, dict] = {
         "the word 'non-covalent' must never be labelled 'covalent'",
     ],
     },
-        "exclude": [
-            "theoretical sizes",
-            "expected sizes",
-            "pore sizes",
-            "filter sizes",
-            "instrument limits",
-        ],
-    },
-
     "zeta_potential_mv": {
         "description": "Zeta potential (surface charge)",
         "unit_hint": "mV",
