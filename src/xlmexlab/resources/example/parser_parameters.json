@@ -1,0 +1,17 @@
+{
+    "time_units" : [],
+    "temperature_units" : ["C", "K", "F", "Celsius", "Kelvin", "Fahrenheit", "\u25e6C"],
+    "pressure_units" : [],
+    "quantity_units" : [],
+    "size_units" : [],
+    "stirring_units" : [],
+    "heat_ramp_units" : [],
+    "concentration_units" : [],
+    "flow_rate_units" : [],
+    "time_words" : [],
+    "temperature_words" : [],
+    "pressure_words" : [],
+    "atmosphere_words" : [],
+    "amount_words" : [],
+    "size_words" : []
+}

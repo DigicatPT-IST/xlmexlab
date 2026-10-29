@@ -3,7 +3,7 @@
 
 import os
 
-from zs4procext.randomization import seed_everything
+from xlmexlab.randomization import seed_everything
 
 
 def test_seed_everything():

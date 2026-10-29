@@ -1,11 +1,11 @@
 import importlib_resources
 
-from zs4procext.evaluator import Evaluator
+from xlmexlab.evaluator import Evaluator
 
 
 def test_evaluator():
     dataset_path: str = str(
-        importlib_resources.files("zs4procext") / "resources" / "evaluation_test.txt"
+        importlib_resources.files("xlmexlab") / "resources" / "evaluation_test.txt"
     )
     evaluator: Evaluator = Evaluator(reference_dataset_path=dataset_path)
     actions_eval = evaluator.evaluate_actions(dataset_path)

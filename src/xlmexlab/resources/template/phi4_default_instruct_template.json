@@ -1,0 +1,18 @@
+{
+    "input_variables": [
+        "expertise",
+        "initialization",
+        "objective",
+        "context",
+        "definitions",
+        "answer_schema",
+        "conclusion"
+    ],
+    "input_types": {},
+    "output_parser": null,
+    "partial_variables": {},
+    "template": "<|user|><|image_1|>{expertise}{initialization}{definitions}{objective}{context}{answer_schema}{conclusion}<|end|><|assistant|>",
+    "template_format": "f-string",
+    "validate_template": true,
+    "_type": "prompt"
+}

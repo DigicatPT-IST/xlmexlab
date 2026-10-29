@@ -1,0 +1,28 @@
+{
+  "expertise": "You are an expert on organic synthesis.",
+  "initialization": "Take your time to perform the task as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
+  "objective":"Create an action graph of the synhtesis procedure in the following sentence:",
+  "definitions": {"Initialization" : "To create the action graph use only some the following actions, adding all the necessary information and repeating them if needed:",
+              "Add" : "Add, mix or pour a new compound into a solution, indicate time, temperature and pressure of the addition if possible;",
+              "Cool" : "Reducing the temperature of a mixture;",
+              "Heat" : "Increasing the temperature of a mixture;",
+              "Stir" : "Stirring or agitation operation, give information about time and temperature of the 'stir' operation;",
+              "Concentrate" : "Evaporation of a substance to concentrate or semi concentrate;",
+              "Dry" : "Drying a solution;",
+              "Extract" : "Extraction of a compound using a solvent;",
+              "Wash" : "Cleaning or washing a substance;",
+              "MakeSolution" : "Preparing a solution initially, indicate quantities of the solvent and compounds when possible;",
+              "Filter" : "Filtering operation;",
+              "Purify" : "Purification or chromatography operation;",
+              "Quench" : "Quenching operation;",
+              "PhaseSeparation" : "Separation or fractionation between organic phase and aqueous phase layers;",
+              "Partition" : "Addition of 2 immiscible solvents for a phase separation;",
+              "Degas" : "Purge the mixture with a gas;",
+              "Recrystallize": "Recrystallize a solid from a solvent or a mixture of solvents",
+              "Triturate": "Triturate de residue",
+              "Sonicate": "Agitate with sound waves",
+              "Wait" : "Time passing with no action;"
+              },
+  "answer_schema": {},
+  "conclusion":  "Please do not mention actions that are not present in the sentence"
+}

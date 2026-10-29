@@ -1,0 +1,1354 @@
+#parser
+import re
+from collections import OrderedDict
+from pydantic import BaseModel, PrivateAttr
+import Levenshtein
+from typing import List, Dict, Any, Optional
+from xlmexlab.nanoparticle_paragraph import CARGO_DB, cargo_map
+
+cargo_list = sorted({
+    x for vals in CARGO_DB.values() for x in vals
+})
+
+
+# 2. HELPERS
+SEP = r"[-_\s/]+"          # flexible separator
+RNA = r"(?:rna)?"
+WORD = r"\b"
+
+def rx(term):
+    return WORD + term + WORD
+
+COMPILED_MAP = [
+    (re.compile(pattern, re.I), canonical)
+    for pattern, canonical in cargo_map.items()
+]
+
+
+ORGAN_MAP = {
+    # Bladder
+    "bladder": "bladder",
+    "urinary bladder": "bladder",
+
+    # Brain / CNS
+    "brain": "brain",
+    "cerebral": "brain",
+    "cortex": "brain",
+    "hippocampus": "brain",
+    "hypothalamus": "brain",
+    "pineal": "brain",
+    "pituitary": "brain",
+    "pituitary gland": "brain",
+    "spinal cord": "brain",
+    "neural": "brain",
+    "nerve": "brain",
+
+    #bone marrow
+    "bone marrow": "bone marrow",
+
+    #bone
+    "bone": "bone",
+
+    # Heart
+    "heart": "heart",
+    "cardiac": "heart",
+    "myocardial": "heart",
+
+    #Intestine
+    "intestine": "intestine",
+    "intestinal": "intestine",
+    "gut": "intestine",
+    "bowel": "intestine",
+    "duodenum": "intestine",
+    "jejunum": "intestine",
+    "ileum": "intestine",
+    "colon": "intestine",
+    "colonic": "intestine",
+    "rectum": "intestine",
+    "rectal": "intestine",
+    "appendix": "intestine",
+    "appendiceal": "intestine",
+
+    #Kidney
+    "kidney": "kidney",
+    "renal": "kidney",
+    "nephric": "kidney",
+
+    # Heart
+    "heart": "heart",
+    "cardiac": "heart",
+    "myocardial": "heart",
+    
+    #Liver
+    "liver": "liver",
+    "hepatic": "liver",
+    "hepatocyte": "liver",
+    "hepatocellular": "liver",
+
+    # Lung
+    "lung": "lung",
+    "pulmonary": "lung",
+    "bronchus": "lung",
+    "bronchial": "lung",
+    "alveolar": "lung",
+    
+    #Muscle
+    "muscle": "muscle",
+    "skeletal muscle": "muscle",
+
+    # Spleen
+    "spleen": "spleen",
+    "splenic": "spleen",
+
+    # Stomach
+    "stomach": "stomach",
+    "gastric": "stomach",
+
+    #Thymus
+    "thymus": "thymus",
+
+    #Thyroid gland
+    "thyroid gland": "thyroid gland",
+
+#não aparecem no paper
+    # Pancreas -> nao aparece
+    "pancreas": "pancreas",
+    "pancreatic": "pancreas",
+
+    # Gallbladder / biliary
+    "gallbladder": "gallbladder",
+    "biliary": "gallbladder",
+    "bile duct": "gallbladder",
+
+    # Blood / circulation
+    "blood": "blood",
+    "plasma": "blood",
+    "serum": "blood",
+    "vascular": "blood vessel",
+    "vessel": "blood vessel",
+    "aorta": "blood vessel",
+    "artery": "blood vessel",
+    "arterial": "blood vessel",
+    "vein": "blood vessel",
+    "venous": "blood vessel",
+    "capillary": "blood vessel",
+
+    # Lymphatic
+    "lymph node": "lymph node",
+    "lymphatic": "lymph node",
+    "tonsil": "tonsil",
+    "tonsillar": "tonsil",
+
+    # Reproductive male
+    "prostate": "prostate",
+    "prostatic": "prostate",
+    "testis": "testis",
+    "testes": "testis",
+    "testicular": "testis",
+
+    # Reproductive female
+    "ovary": "ovary",
+    "ovarian": "ovary",
+    "uterus": "uterus",
+    "uterine": "uterus",
+    "cervix": "cervix",
+    "cervical": "cervix",
+    "vagina": "vagina",
+    "vaginal": "vagina",
+    "breast": "breast",
+    "mammary": "breast",
+
+    # Endocrine
+    "thyroid": "thyroid",
+    "adrenal": "adrenal gland",
+    "adrenal gland": "adrenal gland",
+
+    # Head / ENT
+    "eye": "eye",
+    "ocular": "eye",
+    "retina": "eye",
+    "ear": "ear",
+    "otic": "ear",
+    "nose": "nose",
+    "nasal": "nose",
+    "sinus": "nose",
+    "pharynx": "throat",
+    "larynx": "throat",
+    "trachea": "throat",
+    "esophagus": "esophagus",
+    "esophageal": "esophagus",
+
+    # Skin / soft tissue
+    "skin": "skin",
+    "cutaneous": "skin",
+    "fat": "adipose tissue",
+    "adipose": "adipose tissue",
+    "soft tissue": "soft tissue",
+    "cartilage": "cartilage",
+    "tendon": "tendon",
+    "ligament": "ligament",
+    "joint": "joint",
+    "synovial": "joint",
+
+
+    # Body cavities / membranes
+    "peritoneum": "peritoneum",
+    "peritoneal": "peritoneum",
+    "pleura": "pleura",
+    "pleural": "pleura",
+    "pericardium": "pericardium",
+    "pericardial": "pericardium",
+    "diaphragm": "diaphragm",
+
+    # Tumor / disease tissue
+    "tumor": "tumor",
+    "tumour": "tumor",
+    "xenograft": "tumor",
+    "metastasis": "tumor",
+}
+
+DEFAULT_FIELDS = ["parameter_name", "value", "unit", "condition"]
+
+PARAM_META = {
+
+    "size_nm": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code", "size_type", 
+        ],
+    },
+
+    "zeta_potential_mv": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code"
+        ],
+    },
+
+    "bioconjugation_nature": {
+        "fields": [
+            "bioconjugation_nature", "nature", "sample_code"
+        ],
+    },
+
+    "pdi": {
+        "fields": [
+            "parameter_name", "value", "methodology"
+        ],
+    },
+
+    "encapsulation_efficiency_pct": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code"
+        ],
+    },
+
+    "ic50": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code", "cell_line"
+        ],
+    },
+
+    "distribution_half_life_h": {
+        "fields": [
+            "parameter_name", "value", "unit", "condition"
+        ],
+    },
+
+    "circulation_half_life_h": {
+        "fields": [
+            "parameter_name", "value", "unit", "condition"
+        ],
+    },
+
+    "dose_group": {
+        "fields": [
+            "parameter_name", "value", "unit", "therapeutic_molecule", "sample_code", "schedule",
+        ],
+    },
+
+    "tumor_reduction": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code",
+        ],
+    },
+
+    "tumor_size_or_volume": {
+        "fields": [
+            "parameter_name", "value", "unit", "sample_code", "state", "comparasion",
+        ],
+    },
+
+    "delivery_efficiency": {
+        "fields": [
+            "parameter_name", "value", "unit", "condition"
+        ],
+    },
+
+    "biodistribution": {
+        "fields": [
+            "parameter_name", "value", "unit", "condition", "sample_code"
+        ],
+    },
+}
+
+#non-lipids
+
+NON_LIPIDS = {
+    "dextrose", "dex", "glucose", "sucrose", "trehalose",
+    "chloroform", "ethanol", "methanol", "water", "pbs", "hepes", "dmso", "nacl",
+    "dir", "dii", "did", "dio", "c6", "coumarin6", "fitc", "cy5", "cy7",
+}
+
+
+MOUSE_KG = 0.030
+TO_MG = {"µg": 1e-3, "ug": 1e-3, "mg": 1.0, "g": 1e3, "kg": 1e6}
+
+
+VOLUME_DENOM_RX = re.compile(r"/\s*(?:[mµμu]?l|dl|cm3|cm³)\b", re.I)
+
+def _is_concentration(unit: str) -> bool:
+    u = (unit or "").strip().replace("μ", "µ")
+    return bool(VOLUME_DENOM_RX.search(u))
+
+
+class ParserNanoparticle(BaseModel):
+    _parameters: List[str] = PrivateAttr(default_factory=list)
+
+    def correct_param(self, param:str, parameters: List[str])-> str:
+        best_match = param
+        best_score = 0
+
+        for p in parameters:
+            score = Levenshtein.ratio(param, p)
+
+            if score > best_score:
+                best_score = score
+                best_match = p
+
+        if best_score == 1:
+            return param  # já é perfeito
+        else:
+            return best_match  # substitui pelo mais próximo
+        
+    def normalize_value(self, field: str, value):
+        if value is None:
+            return None
+        
+        if value in ("", "-", "none", "not_extractable"):
+            return None
+
+        value = value.strip()
+
+        # convert numeric values automatically
+        if field == "value":
+            try:
+                return float(value)
+            except Exception:
+                return value
+
+        return value
+    
+   
+
+    def _is_param_label(self, token: str, known_param: str) -> bool:
+        """Heuristic: does this token look like it's naming known_param,
+        rather than being a real data value?"""
+        if not token:
+            return False
+
+        score = Levenshtein.ratio(token.strip().lower(), known_param.strip().lower())
+        return score >= 0.6
+
+
+    def parse_response(self, response: str, known_param: str | None = None) -> dict[str, list[dict]]:
+
+        results = {}
+
+        for raw_line in response.strip().splitlines():
+
+            line = raw_line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [p.strip() for p in line.split("|")]
+
+            if len(parts) < 1:
+                continue
+
+            if known_param is not None:
+                param = known_param
+                meta = PARAM_META.get(param, {})
+                fields = meta.get("fields", DEFAULT_FIELDS)
+                data_fields = fields[1:]
+
+                # decide per-line whether parts[0] is the label or real data
+                if self._is_param_label(parts[0], known_param):
+                    start_idx = 1
+                else:
+                    start_idx = 0
+            else:
+                raw_param = parts[0]
+                param = self.correct_param(raw_param, self._parameters)
+                meta = PARAM_META.get(param, {})
+                fields = meta.get("fields", DEFAULT_FIELDS)
+                data_fields = fields[1:]
+                start_idx = 1
+
+            entry = {}
+            for offset, field in enumerate(data_fields):
+                idx = start_idx + offset
+                value = parts[idx] if idx < len(parts) else None
+                value = self.normalize_value(field, value)
+                entry[field] = value
+
+            results.setdefault(param, []).append(entry)
+
+        return results
+
+    def detect_organ(self, text: str, organ_map: dict) -> str:
+        text_low = text.lower()
+
+        # ordenar por comprimento (multi-word first)
+        keys = sorted(organ_map.keys(), key=len, reverse=True)
+
+        for kw in keys:
+            pattern = r"\b" + re.escape(kw) + r"\b"
+            if re.search(pattern, text_low):
+                return organ_map[kw]
+
+        return None
+
+
+    def postprocess_biodistribution(self, entries: list[dict]) -> dict:
+        processed = []
+
+        for item in entries:
+            raw_val = str(item.get("value", "")).replace("%", "").strip()
+
+            try:
+                percent = float(raw_val)
+            except:
+                percent = None
+
+            cond = item.get("condition") or ""
+            
+            organ = self.detect_organ(cond, ORGAN_MAP) or "unknown"
+            processed.append({
+                "organ": organ,
+                "percent": percent,
+                "unit": item.get("unit"),
+                "sample_code": item.get("sample_code"),
+
+            })
+        processed = sorted(
+            processed,
+            key=lambda x: (x["percent"] is not None, x["percent"]),
+            reverse=True
+        )
+
+        final = {}
+        for i, row in enumerate(processed, start=1):
+            final[f"of_target_{i}"] = row
+
+        return final
+
+    def extract_cargos(self, text: str) -> list[str]:
+        """Return all cargos, normalizing known ones and keeping unknown ones."""
+
+        # Remove text inside parentheses
+        text = re.sub(r"\([^)]*\)", "", text)
+
+        # Split on common separators
+        parts = re.split(r"\s*(?:,|;|/|\+|\band\b|\bor\b)\s*", text)
+
+        cargos = []
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            matched = False
+
+            for pat, name in COMPILED_MAP:
+                if pat.fullmatch(part) or pat.search(part):
+                    cargos.append(name)
+                    matched = True
+                    break
+
+            if not matched:
+                cargos.append(part)
+
+        # Remove duplicates while preserving order
+        return list(dict.fromkeys(cargos))
+
+
+    def postprocess_IC50(self, entries: list[dict]) -> dict:
+        processed = []
+        for item in entries:
+
+            cond = item.get("sample_code") or ""
+            #cargo = self.extract_cargos(cond) or "unknown"
+
+            processed.append({
+                "value": item.get("value"),
+                "unit": item.get("unit"),
+                "cargo/formulation": cond,
+                "cell_line": item.get("cell_line"),
+            })
+        return processed
+    
+    def postprocess_ratio(self, lipids_list: list[str], lipids_ratio_list: list[str], dimension: str) -> dict:
+        if lipids_list is not None and lipids_ratio_list is not None:
+            if len(lipids_list) != len(lipids_ratio_list):
+                lipids_list = None
+                lipids_ratio_list = None
+            else: 
+                    processed = []
+                    for lipid, ratio in zip(lipids_list, lipids_ratio_list):
+                        processed.append({
+                            "lipid": lipid,
+                            "ratio": ratio,
+                            "distribution": dimension,
+                        })
+        return processed
+    
+
+
+    def postprocess_dose_group(self, entries: list[dict]) -> list[dict]:
+        processed = []
+        for item in entries:
+            unit = (item.get("unit") or "").replace("μ", "µ").strip()
+            value = item.get("value")
+
+            if not unit or _is_concentration(unit):
+                continue
+
+            converted = False
+            if unit in TO_MG:
+                try:
+                    value = f"{float(value) * TO_MG[unit] / MOUSE_KG:.4g}"
+                    unit, converted = "mg/kg", True
+                except (TypeError, ValueError):
+                    pass
+
+            processed.append({
+                "value": value,
+                "unit": unit,
+                "therapeutic_molecule": item.get("therapeutic_molecule"),
+                "sample_code": item.get("sample_code"),
+                "converted": converted,
+                "original_value": item.get("value") if converted else None,
+                "original_unit": item.get("unit") if converted else None,
+            })
+        return processed
+        
+    def compute_charge_group(self, entries: list[dict]) -> str | None:
+        if not entries:
+            return None
+
+        try:
+            # take first valid numeric value
+            for item in entries:
+                val = item.get("value")
+
+                if val is None:
+                    continue
+
+                zeta = float(str(val).replace(",", ".").split()[0])
+
+                if zeta > 10:
+                    return "positive"
+                elif zeta < -10:
+                    return "negative"
+                else:
+                    return "neutral"
+
+        except Exception:
+            return None
+
+        return None
+
+    def postprocess_tumor_size_or_volume(self, data: list[dict]) -> list[dict]:
+        if data is None:
+            return []
+
+        processed = []
+        for item in data:
+            unit = item.get("unit", "")
+
+            # Exclude values measured in grams
+            if unit is not None and unit.strip().lower() == "g":
+                continue
+
+            processed.append(item)
+
+        return processed
+
+
+    def replace(self, T_and_F_list: dict, simulated_llm_response: str) -> dict:
+        known_param = next(k for k, v in T_and_F_list.items() if v)
+        parsed = self.parse_response(simulated_llm_response, known_param)
+
+        postprocessors = {
+            "biodistribution":
+                self.postprocess_biodistribution,
+
+            "ic50":
+                self.postprocess_IC50,
+
+            "dose_group":
+                self.postprocess_dose_group,
+            "tumor_size_or_volume":
+                self.postprocess_tumor_size_or_volume
+        }
+
+        for key, fn in postprocessors.items():
+
+            if key in parsed:
+                parsed[key] = fn(parsed[key])
+
+        for key, value in parsed.items():
+
+            if key in T_and_F_list:
+                T_and_F_list[key] = value
+
+        if (
+            "zeta_potential_mv" in T_and_F_list
+            and not T_and_F_list.get("charge_group")
+        ):
+
+            charge = self.compute_charge_group(
+                T_and_F_list["zeta_potential_mv"]
+            )
+
+            T_and_F_list["charge_group"] = charge
+
+        if not T_and_F_list.get("dose_group"):
+                T_and_F_list["no_days_dosing_grouped"] = None
+
+        return T_and_F_list
+    
+
+    def parse_schedule_response(self, response: str) -> dict[str, str]:
+        """
+        Parses the schedule LLM response into a dict of {sample_code: schedule}.
+        Expected format per line:  DrugName | single_dose
+        """
+        results = {}
+
+        for raw_line in response.strip().splitlines():
+            line = raw_line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [p.strip() for p in line.split("|")]
+
+            if len(parts) < 2:
+                continue
+
+            sample_code = parts[0]
+            schedule  = parts[1] if parts[1] else "unknown"
+
+            results[sample_code] = schedule
+
+        return results
+
+
+    def update_schedule(self, T_and_F_list: dict, schedule_raw: str) -> dict:
+        """
+        Parses the raw schedule LLM response and injects 'schedule'
+        into each entry of dose_group, matched by sample_code.
+        """
+        if "dose_group" not in T_and_F_list or not T_and_F_list["dose_group"]:
+            return T_and_F_list
+
+        parsed = self.parse_schedule_response(schedule_raw)
+        print(f"  [PARSER.update_schedule] Parsed schedule: {parsed}")
+
+        for entry in T_and_F_list["dose_group"]:
+            sample_code = entry.get("sample_code")
+            entry["schedule"] = parsed.get(sample_code, "unknown")
+            print(f"  [PARSER.update_schedule] {sample_code} → {entry['schedule']}")
+
+        return T_and_F_list
+
+    @staticmethod
+    def _alnum_key(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+    def parse_missing_lipids(self, response: str) -> list[str]:
+        response = response.strip()
+        if not response or response.lower() in ("none", "n/a", "-"):
+            return []
+        items = []
+        for raw_line in response.splitlines():
+            line = raw_line.strip(" -•*\t,;.()[]")
+            if line and line.lower() != "none":
+                items.append(line)
+        return items
+
+    @staticmethod
+    def _norm_key(s: str) -> str:
+        """Lowercase + collapse whitespace, for case/space-insensitive comparisons."""
+        return " ".join(s.strip().lower().split())
+    
+    def update_lipid_composition(self, T_and_F_list, missing_raw, normalization_map, generic_terms):
+        if "lipid_composition" not in T_and_F_list:
+            return T_and_F_list
+
+        regex_items = T_and_F_list.get("lipid_composition") or []
+        llm_items = self.parse_missing_lipids(missing_raw)
+        print(f"  [PARSER.update_lipid_composition] regex: {regex_items} | LLM: {llm_items}")
+
+        norm_lookup = {self._alnum_key(k): v for k, v in normalization_map.items()}
+        norm_lookup[self._alnum_key("m2000PEG DSPE")] = "DSPE-PEG2000"
+        non_lipid_keys = {self._alnum_key(x) for x in NON_LIPIDS}
+
+        # LLM list is the base; regex items are only kept if they pass the same filter
+        # (switch the order to regex_items + llm_items if you want regex to stay as base)
+        candidates = llm_items + regex_items
+
+        merged, seen = [], set()
+        for item in candidates:
+            canonical = norm_lookup.get(self._alnum_key(item), item)
+            key = self._alnum_key(canonical)
+            if not key or key in non_lipid_keys or key in seen:
+                continue
+            seen.add(key)
+            merged.append(canonical)
+
+        # generic-term suppression (e.g. drop "phosphatidylcholine" if a specific PC exists)
+        merged_keys = {self._alnum_key(m) for m in merged}
+        for generic, specific_set in generic_terms.items():
+            specific_keys = {self._alnum_key(s) for s in specific_set}
+            if self._alnum_key(generic) in merged_keys and merged_keys & specific_keys:
+                merged = [m for m in merged if self._alnum_key(m) != self._alnum_key(generic)]
+
+        T_and_F_list["lipid_composition"] = merged if merged else None
+        return T_and_F_list
+    
+    def parse_load_status_response(self, response: str) -> dict[tuple, str]:
+        results = {}
+        for raw_line in response.strip().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                continue
+            value, unit, status = parts[0], parts[1], parts[2]
+            key = self._make_size_key(value, unit)
+            results[key] = status if status in ("loaded", "unloaded") else None
+        return results
+
+    def update_load_status(self, T_and_F_list: dict, load_raw: str) -> list[dict]:
+        size_entries = T_and_F_list.get("size_nm")
+        if not size_entries:
+            return size_entries
+
+        parsed = self.parse_load_status_response(load_raw)
+
+        for entry in size_entries:
+            key = self._make_size_key(entry.get("value"), entry.get("unit"))
+            entry["load"] = parsed.get(key)  # None if not matched/unknown
+
+        return size_entries
+
+    @staticmethod
+    def _make_size_key(value, unit) -> tuple:
+        """
+        Normalize size values so that:
+        100 == 100.0
+        >50 == > 50
+        >50 nm == >50
+        <100 == < 100.0
+        >=25 == >= 25
+        """
+        u = str(unit).strip().lower() if unit else None
+
+        if value is None:
+            normalized = None
+        else:
+            s = str(value).strip()
+
+            # Remove unit if it appears at the end of the value
+            if u and s.lower().endswith(u):
+                s = s[:-len(u)].strip()
+
+            # match optional operator + number
+            m = re.match(r'^\s*(>=|<=|>|<)?\s*(-?\d+(?:\.\d+)?)\s*$', s)
+            if m:
+                op = m.group(1) or "="
+                num = round(float(m.group(2)), 4)
+                normalized = (op, num)
+            else:
+                # fallback for non-numeric expressions
+                normalized = re.sub(r'\s+', '', s).lower()
+
+        return (normalized, u)
+    
+    def parse_lipid_ratio_units_response(self, response: str) -> str | None:
+        for raw_line in response.strip().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2:
+                continue
+            param_name, value = parts[0], parts[1]
+            if param_name != "lipid_composition_ratio_units":
+                continue
+            if value.lower() in ("not_extractable", "not extractable", "", "-", "none"):
+                return None
+            return value
+
+        return None
+    
+    def parse_formulation_registry(self, response: str) -> dict[str, dict]:
+        registry = {}
+
+        for raw_line in response.strip().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                continue
+
+            code, drug, load = parts[0], parts[1], parts[2]
+
+            if code == "<CODE>":
+                continue
+
+            sample_code = None if drug.lower() in ("none", "", "-") else drug
+            if sample_code is None:
+                continue  # Skip formulations without a drug name
+
+            sample_codes = self.extract_cargos(sample_code)
+
+            if not sample_codes:
+                sample_codes=[sample_code]
+
+            registry[code.upper()] = {
+                "therapeutic_molecule": sample_codes,
+                "load": load if load in ("loaded", "unloaded") else None,
+            }
+
+        return registry
+    
+    def parse_cargo_category_check(self, response: str) -> dict[str, dict]:
+
+        results = {}
+        for raw_line in response.strip().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                continue
+            name, is_drug, category = parts[0], parts[1], parts[2]
+            results[name] = {
+                "is_drug": is_drug.lower() == "yes",
+                "category": category,
+            }
+        return results
+    
+
+    def parse_lipid_ratio_response(self, response: str, lipids: list[str]) -> dict | None:
+        """
+        Parses the lipid ratio LLM response.
+        Returns {"ratios": [float|None, ...]} aligned by position with lipids list,
+        or None if not extractable at all.
+        """
+        
+        # check for global not_extractable
+        lines = [l.strip() for l in response.strip().splitlines() if l.strip() and not l.startswith("#")]
+        if len(lines) == 1 and "not_extractable" in lines[0].lower() and "|" in lines[0]:
+            parts = [p.strip() for p in lines[0].split("|")]
+            if len(parts) == 2:  # lipid_composition_ratio | not_extractable
+                return None
+
+        # parse per-lipid lines
+        ratio_map = {}
+        for raw_line in lines:
+            parts = [p.strip() for p in raw_line.split("|")]
+            if len(parts) < 3:
+                continue
+            _, lipid_name, ratio_value = parts[0], parts[1], parts[2]
+            if ratio_value.lower() in ("not_extractable", "not extractable", "", "-", "none"):
+                ratio_map[lipid_name.strip().lower()] = None
+            else:
+                try:
+                    ratio_map[lipid_name.strip().lower()] = float(ratio_value)
+                except ValueError:
+                    ratio_map[lipid_name.strip().lower()] = None
+
+        # align by position with lipids list
+        ratios = [ratio_map.get(l.strip().lower()) for l in lipids]
+
+        # if all None, treat as not extractable
+        if all(r is None for r in ratios):
+            return None
+        return {"ratios": ratios}
+
+
+
+class ImageParserKeys(BaseModel):
+    """Parses the raw VLM text output from PromptCreationImageKeys
+    into structured axis labels, ticks, and series names."""
+
+    _data: Dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    def parse(self, raw_output: str) -> None:
+        self._data = {
+            "x_axis": self._extract_field(raw_output, "X_AXIS"),
+            "x_ticks": self._extract_list(raw_output, "X_TICKS"),
+            "y_axis": self._extract_field(raw_output, "Y_AXIS"),
+            "y_ticks": self._extract_list(raw_output, "Y_TICKS"),
+            "series": self._extract_series(raw_output),
+        }
+
+    def get_data_dict(self) -> Dict[str, Any]:
+        return self._data
+
+    @staticmethod
+    def _extract_field(text: str, key: str) -> Optional[str]:
+        match = re.search(rf"{key}:\s*(.+)", text)
+        return match.group(1).strip() if match else None
+
+
+    @staticmethod
+    def _extract_series(text: str) -> List[Dict[str, str]]:
+        match = re.search(r"SERIES:\s*(.+)", text, re.DOTALL)
+        if not match:
+            return []
+
+        series = []
+
+        for line in match.group(1).splitlines():
+            line = line.strip()
+
+            if not line.startswith("-"):
+                if line == "" and series:
+                    break
+                continue
+
+            line = line.lstrip("-").strip()
+
+            parsed = {}
+            for p in line.split("|"):
+                if ":" in p:
+                    k, v = p.split(":", 1)
+                    parsed[k.strip().lower()] = v.strip()
+
+            series.append(parsed)
+
+        return series
+        
+    @staticmethod
+    def _extract_list(text: str, key: str) -> List[str]:
+        match = re.search(rf"{key}:\s*\[(.*?)\]", text, re.DOTALL)
+        if not match:
+            return []
+
+        content = match.group(1)
+        content = re.sub(r"(?<=\S),(?=\S)", "", content)
+
+        return [
+            item.strip().strip("\"'")
+            for item in content.split(",")
+            if item.strip()
+        ]
+
+    @staticmethod
+    def _extract_points(text: str) -> List[Dict[str, Any]]:
+        # Only look inside FINAL_ANSWER section, if present
+        final_match = re.search(r"FINAL_ANSWER:\s*(.*)", text, re.DOTALL)
+        section = final_match.group(1) if final_match else text
+
+        points = []
+        for match in re.finditer(r"\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)", section):
+            x_raw, y_raw = match.group(1).strip(), match.group(2).strip()
+            points.append({"x": x_raw, "y": y_raw})
+        return points
+
+class SeriesPointsParser(BaseModel):
+
+    @staticmethod
+    def parse_points(raw_output: str) -> List[List[Any]]:
+        points = []
+        for match in re.finditer(r"\(\s*([^,()]+?)\s*,\s*([^,()]+?)\s*\)", raw_output):
+            x_raw, y_raw = match.group(1).strip(), match.group(2).strip()
+            points.append([
+                SeriesPointsParser._to_float(x_raw),
+                SeriesPointsParser._to_float(y_raw),
+            ])
+        return points
+
+    @staticmethod
+    def _to_float(value: str) -> Any:
+        if value.upper() in {"N/A", "NA", "UNKNOWN"}:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return value 
+
+
+#TEST
+
+"""
+Grounding-based graph digitizer.
+
+VLM  -> pixel positions (tick labels, markers, bar boxes)
+code -> calibration (pixel -> data value), outlier rejection, log detection, snapping
+"""
+import json
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from xlmexlab.prompt import PromptFormatter
+
+
+# prompts
+
+def _prompt(expertise: str, objective: str, schema: str, rules: List[str]) -> dict:
+    return {
+        "expertise": expertise,
+        "initialization": "",
+        "definitions": {},
+        "objective": objective,
+        "answer_schema": {
+            "Format": schema,
+            "Rules": "\n".join(f"- {r}" for r in rules),
+        },
+        "conclusion": "Return ONLY the JSON list. No explanations, markdown, headers, or comments.",
+    }
+
+
+def build_tick_locator_prompt(axis: str, ticks: List[str]) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing text in scientific figures.",
+        objective=(
+            f"Locate the tick labels of the {axis}-axis in the image. "
+            f"The tick labels, in order, are: {ticks}."
+        ),
+        schema='[{"label": "<tick text exactly as in the list>", "bbox_2d": [x1, y1, x2, y2]}, ...]',
+        rules=[
+            "Return one entry per tick label that is visible in the image.",
+            "bbox_2d must tightly enclose the tick label text only (not the axis title, not the legend).",
+            "Use the label text exactly as given in the list.",
+            "Do not invent labels that are not visible.",
+        ],
+    )
+
+
+def build_points_prompt(name: str, color: str, marker: str, line: str) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing data markers in scientific graphs.",
+        objective=(
+            f'Locate every data marker of the series "{name}" '
+            f"(color={color}, marker={marker}, line={line})."
+        ),
+        schema='[{"point_2d": [x, y], "label": "<series name>"}, ...]',
+        rules=[
+            "Return the CENTER of each marker.",
+            "One entry per marker, ordered left to right.",
+            "Do NOT add points along the connecting line; only actual markers.",
+            "Ignore markers of other series and legend symbols.",
+        ],
+    )
+
+
+def build_bars_prompt(name: str, color: str) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing bars in scientific bar charts.",
+        objective=f'Locate every bar of the series "{name}" (color={color}).',
+        schema='[{"bbox_2d": [x1, y1, x2, y2], "label": "<series name>"}, ...]',
+        rules=[
+            "bbox_2d must tightly enclose the bar rectangle only (exclude error bars and labels).",
+            "One entry per bar, ordered left to right.",
+            "Ignore bars of other series and legend swatches.",
+        ],
+    )
+
+
+# ───────────────────────── parsing helpers ─────────────────────────
+
+_LIST_RX = re.compile(r"\[.*\]", re.S)
+
+
+def parse_json_list(text: str) -> List[dict]:
+    text = re.sub(r"```(?:json)?", "", text)
+    m = _LIST_RX.search(text)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        data = []
+        for obj in re.findall(r"\{[^{}]*\}", m.group(0)):
+            try:
+                data.append(json.loads(obj))
+            except json.JSONDecodeError:
+                pass
+    return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
+
+def to_float(s: Any) -> Optional[float]:
+    s = str(s).replace("−", "-").replace("–", "-").replace(",", "").replace("%", "").strip()
+    m = re.search(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", s)
+    return float(m.group()) if m else None
+
+
+def _norm_label(s: str) -> str:
+    return re.sub(r"\s+", "", str(s).replace("−", "-")).lower()
+
+
+# ───────────────────────── coordinates ─────────────────────────
+
+class CoordSpace:
+    """Converts model coordinates to ORIGINAL image pixels."""
+
+    def __init__(self, width: int, height: int, mode: str = "norm1000", scale: float = 1.0):
+        self.w, self.h, self.mode, self.scale = width, height, mode, scale
+
+    def px(self, v: float, axis: str) -> float:
+        if self.mode == "norm1000":
+            return v / 1000.0 * (self.w if axis == "x" else self.h)
+        return v / self.scale  # "absolute": pixels of the (rescaled) image fed to the model
+
+    def bbox(self, b: List[float]):
+        x1, y1, x2, y2 = b
+        x1, x2 = sorted((self.px(x1, "x"), self.px(x2, "x")))
+        y1, y2 = sorted((self.px(y1, "y"), self.px(y2, "y")))
+        return x1, y1, x2, y2
+
+
+# ───────────────────────── axis calibration ─────────────────────────
+
+class NumericAxis:
+    def __init__(self, pix: List[float], vals: List[float]):
+        lin = self._fit(pix, vals, log=False)
+        best, self.log = lin, False
+        if len(vals) >= 3 and min(vals) > 0:
+            lg = self._fit(pix, vals, log=True)
+            if lin["err"] > 0.01 and lg["err"] < 0.5 * lin["err"]:
+                best, self.log = lg, True
+        self.a, self.b, self.err = best["a"], best["b"], best["err"]
+        self.n_used = int(best["keep"].sum())
+        self.n_total = len(vals)
+
+    @staticmethod
+    def _fit(pix, vals, log):
+        p = np.asarray(pix, float)
+        v = np.log10(np.asarray(vals, float)) if log else np.asarray(vals, float)
+        keep = np.ones(len(p), bool)
+        for _ in range(2):                       # drop up to 2 outlier ticks
+            if keep.sum() < 3:
+                break
+            a, b = np.polyfit(p[keep], v[keep], 1)
+            res = np.abs(a * p + b - v)
+            worst = int(np.argmax(np.where(keep, res, -1)))
+            if res[worst] / (np.ptp(v[keep]) or 1.0) > 0.05:
+                keep[worst] = False
+            else:
+                break
+        a, b = np.polyfit(p[keep], v[keep], 1)
+        err = float(np.sqrt(np.mean((a * p[keep] + b - v[keep]) ** 2)) / (np.ptp(v[keep]) or 1.0))
+        return {"a": a, "b": b, "err": err, "keep": keep}
+
+    def value(self, p: float) -> float:
+        v = self.a * p + self.b
+        return float(10 ** v) if self.log else float(v)
+
+    def pixel(self, v: float) -> float:
+        if self.log:
+            v = np.log10(v)
+        return float((v - self.b) / self.a)
+
+    def info(self):
+        return {"type": "log" if self.log else "linear", "rel_rmse": round(self.err, 5),
+                "ticks_used": f"{self.n_used}/{self.n_total}"}
+
+
+class CategoricalAxis:
+    def __init__(self, pix: List[float], labels: List[str]):
+        self.pix, self.labels = np.asarray(pix, float), labels
+
+    def value(self, p: float) -> str:
+        return self.labels[int(np.argmin(np.abs(self.pix - p)))]
+
+    def info(self):
+        return {"type": "categorical", "n": len(self.labels)}
+
+
+# refinement 
+
+def snap_to_marker(arr: np.ndarray, x: float, y: float, radius: int = 12, tol: float = 40.0):
+    """Move (x, y) to the centroid of pixels with the same color as the VLM's point."""
+    h, w, _ = arr.shape
+    xi, yi = int(round(x)), int(round(y))
+    if not (0 <= xi < w and 0 <= yi < h):
+        return x, y
+    ref = np.median(arr[max(0, yi - 2):yi + 3, max(0, xi - 2):xi + 3].reshape(-1, 3), axis=0)
+    if ref.min() > 235:                          # landed on background -> don't trust a snap
+        return x, y
+    X0, X1 = max(0, xi - radius), min(w, xi + radius + 1)
+    Y0, Y1 = max(0, yi - radius), min(h, yi + radius + 1)
+    patch = arr[Y0:Y1, X0:X1].astype(float)
+    mask = np.linalg.norm(patch - ref, axis=2) < tol
+    if mask.sum() < 4:
+        return x, y
+    ys, xs = np.nonzero(mask)
+    return X0 + xs.mean(), Y0 + ys.mean()
+
+
+#  main class
+
+class GraphGrounder:
+    def __init__(self, vlm_model, prompt_template_path: Optional[str],
+                 coord_mode: str = "norm1000", refine: bool = True):
+        self.vlm = vlm_model
+        self.template = prompt_template_path
+        self.coord_mode = coord_mode
+        self.refine = refine
+        self.last_diagnostics: Dict[str, Any] = {}
+
+    def _ask(self, prompt_dict: dict, image_path: str, scale: float) -> str:
+        fm = PromptFormatter(**prompt_dict)
+        fm.model_post_init(self.template)
+        prompt = fm.format_prompt("<image>")
+        out = self.vlm.run_image_single_prompt_rescale(prompt, image_path, scale=scale)
+        print(f"\n  [GraphGrounder] RAW:\n{out}")
+        return out
+
+    # ---- axes ----
+    def _build_axis(self, image_path, axis, ticks, space, scale):
+        ticks = [str(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")]
+        if not ticks:
+            return None, []
+        items = parse_json_list(self._ask(build_tick_locator_prompt(axis, ticks), image_path, scale))
+
+        by_label = {}
+        for it in items:
+            if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
+                by_label.setdefault(_norm_label(it.get("label", "")), it["bbox_2d"])
+
+        pairs = []  # (pixel, tick_text)
+        for t in ticks:
+            b = by_label.get(_norm_label(t))
+            if b:
+                x1, y1, x2, y2 = space.bbox(b)
+                pairs.append(((x1 + x2) / 2 if axis == "x" else (y1 + y2) / 2, t))
+
+        # fallback: model ignored labels but returned one box per tick, in order
+        if len(pairs) < 2 and len(items) == len(ticks):
+            pairs = []
+            for t, it in zip(ticks, items):
+                if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    pairs.append(((x1 + x2) / 2 if axis == "x" else (y1 + y2) / 2, t))
+
+        anchors = [(p, t) for p, t in pairs]
+        nums = [(p, to_float(t)) for p, t in pairs]
+        if len(nums) >= 2 and all(v is not None for _, v in nums):
+            return NumericAxis([p for p, _ in nums], [v for _, v in nums]), anchors
+        if pairs:
+            return CategoricalAxis([p for p, _ in pairs], [t for _, t in pairs]), anchors
+        return None, []
+
+    @staticmethod
+    def _is_bar(s: dict) -> bool:
+        m = str(s.get("marker", "")).strip().lower()
+        l = str(s.get("line", "")).strip().lower()
+        return m in ("none", "", "unknown", "-") and l in ("none", "", "unknown", "-")
+
+    # ---- full extraction ----
+    def extract(self, image_path: str, stage1: dict, scale: float = 1.0,
+                debug_dir: Optional[str] = None) -> Dict[str, Any]:
+        img = Image.open(image_path).convert("RGB")
+        arr = np.array(img)
+        space = CoordSpace(img.width, img.height, self.coord_mode, scale)
+
+        x_map, x_anchors = self._build_axis(image_path, "x", stage1.get("x_ticks"), space, scale)
+        y_map, y_anchors = self._build_axis(image_path, "y", stage1.get("y_ticks"), space, scale)
+
+        result: Dict[str, Any] = {"x_axis": stage1.get("x_axis"), "y_axis": stage1.get("y_axis")}
+        self.last_diagnostics = {
+            "x_axis": x_map.info() if x_map else None,
+            "y_axis": y_map.info() if y_map else None,
+        }
+        overlay_pts: Dict[str, List[tuple]] = {}
+
+        if x_map is None or y_map is None:
+            print("  [GraphGrounder] axis calibration failed -> no series extracted")
+            self.last_diagnostics["error"] = "axis calibration failed"
+            return result
+
+        for s in stage1.get("series", []):
+            name = s.get("name", "UNKNOWN")
+            color = s.get("color", "UNKNOWN")
+            bar = self._is_bar(s)
+
+            if bar:
+                items = parse_json_list(self._ask(build_bars_prompt(name, color), image_path, scale))
+                zero_px = y_map.pixel(0.0) if isinstance(y_map, NumericAxis) and not y_map.log else None
+            else:
+                items = parse_json_list(self._ask(
+                    build_points_prompt(name, color, s.get("marker", "UNKNOWN"), s.get("line", "UNKNOWN")),
+                    image_path, scale))
+
+            px_pts = []
+            for it in items:
+                if bar and len(it.get("bbox_2d", [])) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    cx = (x1 + x2) / 2
+                    cy = y2 if (zero_px is not None and (y1 + y2) / 2 > zero_px) else y1  # negative bars
+                    px_pts.append((cx, cy))
+                elif "point_2d" in it and len(it["point_2d"]) == 2:
+                    px_pts.append((space.px(it["point_2d"][0], "x"), space.px(it["point_2d"][1], "y")))
+                elif len(it.get("bbox_2d", [])) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    px_pts.append(((x1 + x2) / 2, (y1 + y2) / 2))
+
+            if self.refine and not bar:
+                px_pts = [snap_to_marker(arr, x, y) for x, y in px_pts]
+
+            px_pts.sort(key=lambda p: p[0])
+            overlay_pts[name] = px_pts
+
+            out = []
+            for x, y in px_pts:
+                xv = x_map.value(x)
+                yv = y_map.value(y)
+                out.append([round(xv, 4) if isinstance(xv, float) else xv, round(yv, 4)])
+            result[name] = out
+            self.last_diagnostics[name] = {"kind": "bars" if bar else "points", "n": len(out)}
+
+        if debug_dir:
+            self._save_overlay(img, x_anchors, y_anchors, overlay_pts, debug_dir, image_path)
+        return result
+
+    @staticmethod
+    def _save_overlay(img, x_anchors, y_anchors, series_pts, debug_dir, image_path):
+        os.makedirs(debug_dir, exist_ok=True)
+        im = img.copy()
+        d = ImageDraw.Draw(im)
+        for p, _ in x_anchors:
+            d.ellipse([p - 4, im.height - 8, p + 4, im.height], outline="blue", width=2)
+        for p, _ in y_anchors:
+            d.ellipse([0, p - 4, 8, p + 4], outline="blue", width=2)
+        for name, pts in series_pts.items():
+            for x, y in pts:
+                d.ellipse([x - 4, y - 4, x + 4, y + 4], outline="red", width=2)
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        im.save(os.path.join(debug_dir, f"{base}_grounded.png"))
