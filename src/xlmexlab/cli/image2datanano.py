@@ -40,6 +40,8 @@ from xlmexlab.prompt import TEMPLATE_REGISTRY
     type=float,
     help="Scale factor to reduce image resolution (e.g., 0.5 for 50%).",
 )
+@click.option("--debug_dir", default=None, type=str,
+              help="Folder where *_grounded.png overlays are saved.")
 def image2datanano(
     image_folder: str,
     images_chosen_folder: str,
@@ -49,6 +51,7 @@ def image2datanano(
     vlm_model_name: str,
     vlm_model_parameters_path: Optional[str],
     scale: float,
+    debug_dir: Optional[str],
 ):
     start_time = time.time()
 
@@ -58,6 +61,7 @@ def image2datanano(
             prompt_template_path = TEMPLATE_REGISTRY[name]
         except KeyError:
             pass
+    debug_dir = debug_dir or os.path.join(images_chosen_folder, "grounded")
 
     extractor = ImageExtractor(
         prompt_template_path=prompt_template_path,
@@ -73,7 +77,7 @@ def image2datanano(
         print(f"Processing file: {file}")
         extension = file.split(".")[-1]
         print(f"File extension: {extension}")
-        if extension in {"png", "jpeg", "tiff"}:
+        if extension in {"png", "jpg", "jpeg", "tif", "tiff"}:
             file_path = f"{image_folder}/{file}"
             print(f"Processing image file: {file_path}")
 
@@ -84,10 +88,11 @@ def image2datanano(
                 shutil.copy(file_path, os.path.join(images_chosen_folder, file))
                 print(f"Copying {file} to chosen folder")
 
-                extracted_data = extractor.extract_series_data_grounded(file_path, scale=scale)
+                extracted_data = extractor.extract_series_data_grounded(file_path, scale=scale, debug_dir=debug_dir)
                 aggregated_data[file] = extracted_data
 
             except Exception as e:
+                import traceback; traceback.print_exc()
                 print(f"Error processing file {file}: {e}")
 
     with open(output_file_path, "w", encoding="utf-8") as f:

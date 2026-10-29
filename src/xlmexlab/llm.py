@@ -466,7 +466,7 @@ class ModelVLM2(BaseModel):
         Returns:
             str: a string containing the model response
         """
-        pil_image: ImageFile = Image.open(image_path)
+        pil_image: ImageFile = Image.open(image_path).convert("RGB")
         new_prompt: Dict[str, Any] = [
             {
                 "prompt": prompt,
@@ -493,7 +493,7 @@ class ModelVLM2(BaseModel):
         Returns:
             str: a string containing the model response
         """
-        pil_image: ImageFile = Image.open(image_path)
+        pil_image: ImageFile = Image.open(image_path).convert("RGB")
         if scale < 1.0:
             new_size: Tuple[int, int] = (
                 int(pil_image.width * scale),
