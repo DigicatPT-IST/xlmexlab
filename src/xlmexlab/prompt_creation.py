@@ -643,36 +643,30 @@ class PromptCreationIsGraphPrompt(BaseModel):
 
     def build_is_graph_prompt_json(self) -> dict:
         expertise = (
-            "You are an expert in identifying scientific graphs and determining whether their primary subject is biodistribution (%ID/g) or tumour volume/size."
+            "You are an expert on scientific charts."
         )
 
         initialization = ""
 
         objective = (
-            "Determine whether the image contains a scientific graph about biodistribution (%ID/g) or tumour volume/size."
+            "Determine whether the image contains a scientific chart about biodistribution (%ID/g) or tumour volume/size."
         )
 
         schema = "<YES or NO>"
 
         rules = [
-            "Answer YES only if the image clearly shows a graph about biodistribution (%ID/g) or tumour volume/size."
-            "Answer NO if the graph is about any other measurement or scientific outcome.",
-            "For biodistribution, look for indicators such as %ID/g, %ID, tissue or organ distribution, tracer accumulation, drug accumulation, or similar measurements.",
-            "For tumour volume/size, look for indicators such as tumour volume, tumour size, tumour growth, tumour burden, mm3, cm3, or similar measurements.",
-            "Do not infer the subject from the experimental context alone.",
-            "Use the axis labels, units, title, legend, and visible graph content to determine the subject.",
+            "STEP 1: Examine the image carefully to identify if it contains a chart or graph (if it does not contain a chart or graph, answer NO).",
+            "STEP 2: If a chart is present, determine if it is specifically about biodistribution (%ID/g) or tumour volume/size.(OnlyYES if it is about biodistribution or tumour volume/size, otherwise NO).",
+            "Use the axis labels, units, title, legend, and visible chart content to determine the subject.",
             "If the subject cannot be determined confidently, answer NO.",
-            "Return exactly one word: YES or NO.",
-            "Do not include explanations, punctuation, markdown, or additional text.",
         ]
 
         return {
             "expertise": expertise,
             "initialization": initialization,
             "definitions": {
-    "biodistribution": "A graph showing the distribution or accumulation of a substance, drug, tracer, nanoparticle, or other agent in tissues or organs, typically reported as %ID/g, %ID, or a closely related biodistribution measurement.",
-    "tumour_volume_size": "A graph showing tumour volume, tumour size, tumour growth, or changes in tumour dimensions over time or between treatment groups.",
-    "target_graph": "A graph whose primary measured outcome is biodistribution (%ID/g) or tumour volume/size."
+    "biodistribution": "A chart showing the distribution or accumulation of a substance, drug, tracer, nanoparticle, or other agent in tissues or organs, typically reported as %ID/g, %ID, or a closely related biodistribution measurement.",
+    "tumour_volume_size": "A chart showing tumour volume, tumour size, tumour growth, or changes in tumour dimensions over time or between treatment groups.",
   },
             "objective": objective,
             "answer_schema": {

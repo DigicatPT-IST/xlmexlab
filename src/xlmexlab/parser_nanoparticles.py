@@ -997,3 +997,358 @@ class SeriesPointsParser(BaseModel):
             return float(value)
         except ValueError:
             return value 
+
+
+#TEST
+
+"""
+Grounding-based graph digitizer.
+
+VLM  -> pixel positions (tick labels, markers, bar boxes)
+code -> calibration (pixel -> data value), outlier rejection, log detection, snapping
+"""
+import json
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from xlmexlab.prompt import PromptFormatter
+
+
+# prompts
+
+def _prompt(expertise: str, objective: str, schema: str, rules: List[str]) -> dict:
+    return {
+        "expertise": expertise,
+        "initialization": "",
+        "definitions": {},
+        "objective": objective,
+        "answer_schema": {
+            "Format": schema,
+            "Rules": "\n".join(f"- {r}" for r in rules),
+        },
+        "conclusion": "Return ONLY the JSON list. No explanations, markdown, headers, or comments.",
+    }
+
+
+def build_tick_locator_prompt(axis: str, ticks: List[str]) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing text in scientific figures.",
+        objective=(
+            f"Locate the tick labels of the {axis}-axis in the image. "
+            f"The tick labels, in order, are: {ticks}."
+        ),
+        schema='[{"label": "<tick text exactly as in the list>", "bbox_2d": [x1, y1, x2, y2]}, ...]',
+        rules=[
+            "Return one entry per tick label that is visible in the image.",
+            "bbox_2d must tightly enclose the tick label text only (not the axis title, not the legend).",
+            "Use the label text exactly as given in the list.",
+            "Do not invent labels that are not visible.",
+        ],
+    )
+
+
+def build_points_prompt(name: str, color: str, marker: str, line: str) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing data markers in scientific graphs.",
+        objective=(
+            f'Locate every data marker of the series "{name}" '
+            f"(color={color}, marker={marker}, line={line})."
+        ),
+        schema='[{"point_2d": [x, y], "label": "<series name>"}, ...]',
+        rules=[
+            "Return the CENTER of each marker.",
+            "One entry per marker, ordered left to right.",
+            "Do NOT add points along the connecting line; only actual markers.",
+            "Ignore markers of other series and legend symbols.",
+        ],
+    )
+
+
+def build_bars_prompt(name: str, color: str) -> dict:
+    return _prompt(
+        expertise="You are an expert at precisely localizing bars in scientific bar charts.",
+        objective=f'Locate every bar of the series "{name}" (color={color}).',
+        schema='[{"bbox_2d": [x1, y1, x2, y2], "label": "<series name>"}, ...]',
+        rules=[
+            "bbox_2d must tightly enclose the bar rectangle only (exclude error bars and labels).",
+            "One entry per bar, ordered left to right.",
+            "Ignore bars of other series and legend swatches.",
+        ],
+    )
+
+
+# ───────────────────────── parsing helpers ─────────────────────────
+
+_LIST_RX = re.compile(r"\[.*\]", re.S)
+
+
+def parse_json_list(text: str) -> List[dict]:
+    text = re.sub(r"```(?:json)?", "", text)
+    m = _LIST_RX.search(text)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        data = []
+        for obj in re.findall(r"\{[^{}]*\}", m.group(0)):
+            try:
+                data.append(json.loads(obj))
+            except json.JSONDecodeError:
+                pass
+    return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
+
+def to_float(s: Any) -> Optional[float]:
+    s = str(s).replace("−", "-").replace("–", "-").replace(",", "").replace("%", "").strip()
+    m = re.search(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", s)
+    return float(m.group()) if m else None
+
+
+def _norm_label(s: str) -> str:
+    return re.sub(r"\s+", "", str(s).replace("−", "-")).lower()
+
+
+# ───────────────────────── coordinates ─────────────────────────
+
+class CoordSpace:
+    """Converts model coordinates to ORIGINAL image pixels."""
+
+    def __init__(self, width: int, height: int, mode: str = "norm1000", scale: float = 1.0):
+        self.w, self.h, self.mode, self.scale = width, height, mode, scale
+
+    def px(self, v: float, axis: str) -> float:
+        if self.mode == "norm1000":
+            return v / 1000.0 * (self.w if axis == "x" else self.h)
+        return v / self.scale  # "absolute": pixels of the (rescaled) image fed to the model
+
+    def bbox(self, b: List[float]):
+        x1, y1, x2, y2 = b
+        x1, x2 = sorted((self.px(x1, "x"), self.px(x2, "x")))
+        y1, y2 = sorted((self.px(y1, "y"), self.px(y2, "y")))
+        return x1, y1, x2, y2
+
+
+# ───────────────────────── axis calibration ─────────────────────────
+
+class NumericAxis:
+    def __init__(self, pix: List[float], vals: List[float]):
+        lin = self._fit(pix, vals, log=False)
+        best, self.log = lin, False
+        if len(vals) >= 3 and min(vals) > 0:
+            lg = self._fit(pix, vals, log=True)
+            if lin["err"] > 0.01 and lg["err"] < 0.5 * lin["err"]:
+                best, self.log = lg, True
+        self.a, self.b, self.err = best["a"], best["b"], best["err"]
+        self.n_used = int(best["keep"].sum())
+        self.n_total = len(vals)
+
+    @staticmethod
+    def _fit(pix, vals, log):
+        p = np.asarray(pix, float)
+        v = np.log10(np.asarray(vals, float)) if log else np.asarray(vals, float)
+        keep = np.ones(len(p), bool)
+        for _ in range(2):                       # drop up to 2 outlier ticks
+            if keep.sum() < 3:
+                break
+            a, b = np.polyfit(p[keep], v[keep], 1)
+            res = np.abs(a * p + b - v)
+            worst = int(np.argmax(np.where(keep, res, -1)))
+            if res[worst] / (np.ptp(v[keep]) or 1.0) > 0.05:
+                keep[worst] = False
+            else:
+                break
+        a, b = np.polyfit(p[keep], v[keep], 1)
+        err = float(np.sqrt(np.mean((a * p[keep] + b - v[keep]) ** 2)) / (np.ptp(v[keep]) or 1.0))
+        return {"a": a, "b": b, "err": err, "keep": keep}
+
+    def value(self, p: float) -> float:
+        v = self.a * p + self.b
+        return float(10 ** v) if self.log else float(v)
+
+    def pixel(self, v: float) -> float:
+        if self.log:
+            v = np.log10(v)
+        return float((v - self.b) / self.a)
+
+    def info(self):
+        return {"type": "log" if self.log else "linear", "rel_rmse": round(self.err, 5),
+                "ticks_used": f"{self.n_used}/{self.n_total}"}
+
+
+class CategoricalAxis:
+    def __init__(self, pix: List[float], labels: List[str]):
+        self.pix, self.labels = np.asarray(pix, float), labels
+
+    def value(self, p: float) -> str:
+        return self.labels[int(np.argmin(np.abs(self.pix - p)))]
+
+    def info(self):
+        return {"type": "categorical", "n": len(self.labels)}
+
+
+# refinement 
+
+def snap_to_marker(arr: np.ndarray, x: float, y: float, radius: int = 12, tol: float = 40.0):
+    """Move (x, y) to the centroid of pixels with the same color as the VLM's point."""
+    h, w, _ = arr.shape
+    xi, yi = int(round(x)), int(round(y))
+    if not (0 <= xi < w and 0 <= yi < h):
+        return x, y
+    ref = np.median(arr[max(0, yi - 2):yi + 3, max(0, xi - 2):xi + 3].reshape(-1, 3), axis=0)
+    if ref.min() > 235:                          # landed on background -> don't trust a snap
+        return x, y
+    X0, X1 = max(0, xi - radius), min(w, xi + radius + 1)
+    Y0, Y1 = max(0, yi - radius), min(h, yi + radius + 1)
+    patch = arr[Y0:Y1, X0:X1].astype(float)
+    mask = np.linalg.norm(patch - ref, axis=2) < tol
+    if mask.sum() < 4:
+        return x, y
+    ys, xs = np.nonzero(mask)
+    return X0 + xs.mean(), Y0 + ys.mean()
+
+
+#  main class
+
+class GraphGrounder:
+    def __init__(self, vlm_model, prompt_template_path: Optional[str],
+                 coord_mode: str = "norm1000", refine: bool = True):
+        self.vlm = vlm_model
+        self.template = prompt_template_path
+        self.coord_mode = coord_mode
+        self.refine = refine
+        self.last_diagnostics: Dict[str, Any] = {}
+
+    def _ask(self, prompt_dict: dict, image_path: str, scale: float) -> str:
+        fm = PromptFormatter(**prompt_dict)
+        fm.model_post_init(self.template)
+        prompt = fm.format_prompt("<image>")
+        out = self.vlm.run_image_single_prompt_rescale(prompt, image_path, scale=scale)
+        print(f"\n  [GraphGrounder] RAW:\n{out}")
+        return out
+
+    # ---- axes ----
+    def _build_axis(self, image_path, axis, ticks, space, scale):
+        ticks = [str(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")]
+        if not ticks:
+            return None, []
+        items = parse_json_list(self._ask(build_tick_locator_prompt(axis, ticks), image_path, scale))
+
+        by_label = {}
+        for it in items:
+            if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
+                by_label.setdefault(_norm_label(it.get("label", "")), it["bbox_2d"])
+
+        pairs = []  # (pixel, tick_text)
+        for t in ticks:
+            b = by_label.get(_norm_label(t))
+            if b:
+                x1, y1, x2, y2 = space.bbox(b)
+                pairs.append(((x1 + x2) / 2 if axis == "x" else (y1 + y2) / 2, t))
+
+        # fallback: model ignored labels but returned one box per tick, in order
+        if len(pairs) < 2 and len(items) == len(ticks):
+            pairs = []
+            for t, it in zip(ticks, items):
+                if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    pairs.append(((x1 + x2) / 2 if axis == "x" else (y1 + y2) / 2, t))
+
+        anchors = [(p, t) for p, t in pairs]
+        nums = [(p, to_float(t)) for p, t in pairs]
+        if len(nums) >= 2 and all(v is not None for _, v in nums):
+            return NumericAxis([p for p, _ in nums], [v for _, v in nums]), anchors
+        if pairs:
+            return CategoricalAxis([p for p, _ in pairs], [t for _, t in pairs]), anchors
+        return None, []
+
+    @staticmethod
+    def _is_bar(s: dict) -> bool:
+        m = str(s.get("marker", "")).strip().lower()
+        l = str(s.get("line", "")).strip().lower()
+        return m in ("none", "", "unknown", "-") and l in ("none", "", "unknown", "-")
+
+    # ---- full extraction ----
+    def extract(self, image_path: str, stage1: dict, scale: float = 1.0,
+                debug_dir: Optional[str] = None) -> Dict[str, Any]:
+        img = Image.open(image_path).convert("RGB")
+        arr = np.array(img)
+        space = CoordSpace(img.width, img.height, self.coord_mode, scale)
+
+        x_map, x_anchors = self._build_axis(image_path, "x", stage1.get("x_ticks"), space, scale)
+        y_map, y_anchors = self._build_axis(image_path, "y", stage1.get("y_ticks"), space, scale)
+
+        result: Dict[str, Any] = {"x_axis": stage1.get("x_axis"), "y_axis": stage1.get("y_axis")}
+        self.last_diagnostics = {
+            "x_axis": x_map.info() if x_map else None,
+            "y_axis": y_map.info() if y_map else None,
+        }
+        overlay_pts: Dict[str, List[tuple]] = {}
+
+        if x_map is None or y_map is None:
+            print("  [GraphGrounder] axis calibration failed -> no series extracted")
+            self.last_diagnostics["error"] = "axis calibration failed"
+            return result
+
+        for s in stage1.get("series", []):
+            name = s.get("name", "UNKNOWN")
+            color = s.get("color", "UNKNOWN")
+            bar = self._is_bar(s)
+
+            if bar:
+                items = parse_json_list(self._ask(build_bars_prompt(name, color), image_path, scale))
+                zero_px = y_map.pixel(0.0) if isinstance(y_map, NumericAxis) and not y_map.log else None
+            else:
+                items = parse_json_list(self._ask(
+                    build_points_prompt(name, color, s.get("marker", "UNKNOWN"), s.get("line", "UNKNOWN")),
+                    image_path, scale))
+
+            px_pts = []
+            for it in items:
+                if bar and len(it.get("bbox_2d", [])) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    cx = (x1 + x2) / 2
+                    cy = y2 if (zero_px is not None and (y1 + y2) / 2 > zero_px) else y1  # negative bars
+                    px_pts.append((cx, cy))
+                elif "point_2d" in it and len(it["point_2d"]) == 2:
+                    px_pts.append((space.px(it["point_2d"][0], "x"), space.px(it["point_2d"][1], "y")))
+                elif len(it.get("bbox_2d", [])) == 4:
+                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
+                    px_pts.append(((x1 + x2) / 2, (y1 + y2) / 2))
+
+            if self.refine and not bar:
+                px_pts = [snap_to_marker(arr, x, y) for x, y in px_pts]
+
+            px_pts.sort(key=lambda p: p[0])
+            overlay_pts[name] = px_pts
+
+            out = []
+            for x, y in px_pts:
+                xv = x_map.value(x)
+                yv = y_map.value(y)
+                out.append([round(xv, 4) if isinstance(xv, float) else xv, round(yv, 4)])
+            result[name] = out
+            self.last_diagnostics[name] = {"kind": "bars" if bar else "points", "n": len(out)}
+
+        if debug_dir:
+            self._save_overlay(img, x_anchors, y_anchors, overlay_pts, debug_dir, image_path)
+        return result
+
+    @staticmethod
+    def _save_overlay(img, x_anchors, y_anchors, series_pts, debug_dir, image_path):
+        os.makedirs(debug_dir, exist_ok=True)
+        im = img.copy()
+        d = ImageDraw.Draw(im)
+        for p, _ in x_anchors:
+            d.ellipse([p - 4, im.height - 8, p + 4, im.height], outline="blue", width=2)
+        for p, _ in y_anchors:
+            d.ellipse([0, p - 4, 8, p + 4], outline="blue", width=2)
+        for name, pts in series_pts.items():
+            for x, y in pts:
+                d.ellipse([x - 4, y - 4, x + 4, y + 4], outline="red", width=2)
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        im.save(os.path.join(debug_dir, f"{base}_grounded.png"))

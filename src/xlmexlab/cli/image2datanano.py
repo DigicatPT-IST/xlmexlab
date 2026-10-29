@@ -84,7 +84,7 @@ def image2datanano(
                 shutil.copy(file_path, os.path.join(images_chosen_folder, file))
                 print(f"Copying {file} to chosen folder")
 
-                extracted_data = extractor.extract_series_data(file_path, scale=scale)
+                extracted_data = extractor.extract_series_data_grounded(file_path, scale=scale)
                 aggregated_data[file] = extracted_data
 
             except Exception as e:
