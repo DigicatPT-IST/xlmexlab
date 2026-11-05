@@ -1,0 +1,30 @@
+{
+  "expertise": "You are an expert on material synthesis.",
+  "initialization": "Take your time to perform the task as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
+  "objective":"Create an action lists of the synhtesis procedure in the following paragraph:",
+  "definitions": {"Initialization" : "For the action list use only some the following actions, adding all the necessary information and repeating them if needed:",
+              "Add" : "Add, mix or pour a new compound into a solution, indicate time, temperature and pressure of the addition if possible;",
+              "Cool" : "Cooling the mixture Indicate the new temperature;",
+              "Heat" : "Heating the mixture Indicate the new temperature;",
+              "Sonicate" : "Agitation of a mixture using ultrasounds. Indicate time and temperature;",
+              "Stir" : "Agitation of a mixture. Indicate time and temperature;",
+              "NewSolution" : "Initiate a new solution;",
+              "Separate" : "Component separation by filtration or centrifugation. Indicate the phase colected;",
+              "Wash" : "Cleaning of a compound;",
+              "Repeat" : "Indication that there is a repetition of the previous actions. Indicate the amount of repetitions;",
+              "Crystallization" : "Hydrothermal treatment of a gel inside an autoclave;",
+              "Grind" : "Crush or mill a solid;",
+              "Sieve" : "Screen the particles by size;",
+              "Dry" : "Sample drying. Indicate the temperature and time;",
+              "ThermalTreatment" : "Calcination or Reduction of the sample. Indicate the temperature, time and gas used;",
+              "Wait" : "Time passes without nothing happening. Indicate amount of time;",
+              "IonExchange" : "Cation exchange on a solid product;",
+              "AlkalineTreatment" : "Desilication of a material using a basic solution;",
+              "AcidTreatment" : "Dealumination of a material using an acid solution;"
+              },
+  "answer_schema": {
+                    "Initialization" : "For each action found present it in the following way:",
+                    "Format" : "'action name': 'action information"
+                  },
+  "conclusion":  "Present on action per line. Good Luck!"
+}
