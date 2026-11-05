@@ -15,7 +15,7 @@ from xlmexlab import parser
 from xlmexlab.llm import ModelLLM, ModelVLM2
 from xlmexlab.prompt import PromptFormatter
 from xlmexlab.prompt_creation import PromptCreation, PromptCreationImageKeys, PromptCreationIsGraphPrompt, PromptCreationSchedule, PromptCreationLipidComposition, PromptCreationLoadStatus, PromptCreationLipidRatioUnits, PromptCreationFormulationRegistry, PromptCreationCargoCategoryCheck, PromptCreationLipidRatio, PromptCreationSeriesDataPrompt, PromptCreationVerifySeriesPrompt
-from xlmexlab.parser_nanoparticles import ParserNanoparticle, ImageParserKeys, SeriesPointsParser, GraphGrounder
+from xlmexlab.parser_nanoparticles import ParserNanoparticle, ImageParserKeys, SeriesPointsParser
 from xlmexlab.nanoparticle_paragraph import NORMALIZATION_MAP, GENERIC_TERMS, COMPILED_MAP
 from xlmexlab.nanoparticle_paragraph import CARGO_DB, lookup_cargo_category
 
@@ -415,7 +415,7 @@ class ImageExtractor(BaseModel):
     _image_parser: Optional[ImageParserKeys] = PrivateAttr(default=None)
     _series_prompt_builder: Optional[PromptCreationSeriesDataPrompt] = PrivateAttr(default=None)
     _is_graph_prompt_builder: Optional[PromptCreationIsGraphPrompt] = PrivateAttr(default=None)
-    _grounder: Optional[GraphGrounder] = PrivateAttr(default=None)
+    #_grounder: Optional[GraphGrounder] = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         if self.vlm_model_parameters_path is None:
@@ -446,11 +446,11 @@ class ImageExtractor(BaseModel):
         self._image_parser = ImageParserKeys()
         self._series_prompt_builder = PromptCreationSeriesDataPrompt()
         self._verify_prompt_builder = PromptCreationVerifySeriesPrompt()
-        self._grounder = GraphGrounder(self._vlm_model,
-            self.prompt_template_path,
-            coord_mode="norm1000",   # "absolute" for Qwen2.5-VL-style models
-            refine=True,
-        )
+        #self._grounder = GraphGrounder(self._vlm_model,
+        #    self.prompt_template_path,
+        #    coord_mode="norm1000",   # "absolute" for Qwen2.5-VL-style models
+        #    refine=True,
+        #)
 
     def is_graph(self, image_path: str, scale: float = 1.0) -> bool:
         prompt_dict = self._is_graph_prompt_builder.build_is_graph_prompt_json()
