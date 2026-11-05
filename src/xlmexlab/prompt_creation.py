@@ -5,6 +5,9 @@ from pydantic import BaseModel
 DEFAULT_FIELDS = ["parameter_name", "value", "unit", "condition"]
 
 
+MARKERS = ["circle", "square", "triangle", "inverted triangle", "diamond", "star", "cross", "plus",
+           "pentagon", "hexagon", "none"]
+
 # Global two-step screening applied to ALL parameters
 GLOBAL_SCREENING = (
     "For each numerical candidate found in the text, apply these two steps:\n"
