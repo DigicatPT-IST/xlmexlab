@@ -683,58 +683,79 @@ class PromptCreationIsGraphPrompt(BaseModel):
 class PromptCreationImageKeys(BaseModel):
 
     def build_extraction_prompt_json(self) -> dict:
-        expertise = (
-            "You are an expert assistant for extracting structured information "
-            "from scientific graphs."
-        )
+            expertise = (
+                "You are an expert assistant for extracting structured information from scientific graphs. "
+                "You copy text character by character and report colours as measured from the pixels."
+            )
 
-        initialization = ""
+            initialization = (
+                "Look at the whole figure first: the axes, their tick labels, the axis titles and the legend. "
+                "Ignore any inset (a small plot drawn inside the main plot) and any panel letter (a, b, A, B)."
+            )
 
-        objective = (
-            "Given an image of a scientific graph, extract the x-axis label, "
-            "all visible x-axis tick labels, the y-axis label, all visible "
-            "y-axis tick labels, and all series names."
-        )
+            objective = (
+                "Extract the x-axis title, every x-axis tick label, the y-axis title, every y-axis tick label, "
+                "and one entry per legend item with its exact name, colour, marker and line style."
+            )
 
-        schema = """X_AXIS: <x-axis label>
-X_TICKS: [tick1, tick2, ...]
+            schema = """X_AXIS: <x-axis title>
+    X_TICKS: [tick1, tick2, ...]
 
-Y_AXIS: <y-axis label>
-Y_TICKS: [tick1, tick2, ...]
+    Y_AXIS: <y-axis title>
+    Y_TICKS: [tick1, tick2, ...]
 
-SERIES:
-- name: <series 1 name> | color: <color> | marker: <marker shape, or 'none' for bars> | line: <solid/dashed/dotted/none>
-- name: <series 2 name> | color: <color> | marker: <marker shape, or 'none' for bars> | line: <solid/dashed/dotted/none>"""
+    SERIES:
+    - name: <legend text 1> | color: <#RRGGBB (colour name)> | marker: <marker> | line: <solid/dashed/dotted/none>
+    - name: <legend text 2> | color: <#RRGGBB (colour name)> | marker: <marker> | line: <solid/dashed/dotted/none>"""
 
-        rules = [
-            "Copy all text exactly as shown.",
-            "Preserve capitalization, symbols, and units.",
-            "List all visible tick labels in order (left-to-right for x, bottom-to-top for y).",
-            "Series names must match the legend or labels exactly.",
-            "For each series, identify its visual appearance exactly as shown in the legend: color, marker shape (circle, square, triangle, none, etc.), and line style (solid, dashed, dotted, none).",
-            "If a value cannot be read, write UNKNOWN.",
-            "Do not infer or invent missing information.",
-            "Normalize numbers using the numerical convention shown by the graph.", 
-            "If a comma is used as a thousands separator, remove it: 1,100 → 1100, 2,500 → 2500, 10,000 → 10000.", 
-            "If a comma is used as a decimal separator, preserve its numerical meaning: 1,5 → 1.5.", 
-            "Determine whether a comma represents thousands or decimals from the formatting and progression of the other tick labels on the same axis.", 
-            "Do not interpret a thousands separator as a decimal separator.", "Do not interpret a decimal separator as a thousands separator."
-        ]
+            rules = [
+                # titles and ticks
+                "Copy every title and label exactly as printed: same letters, capitals, spaces, symbols and units.",
+                "Units are written as in the figure, e.g. %ID/g, %ID, mm³, µg/mL, µM, h, d. "
+                "Biodistribution units are %ID/g (percent injected dose per gram): never drop the letter I.",
+                "List every visible tick label in order: left-to-right for x, bottom-to-top for y.",
+                "Separate tick labels with a comma followed by a space: [0, 10, 20].",
+                "Write powers of ten as 10^k: 10^-2, 10^-1, 10^0, 10^1. Write 2×10^3 as 2×10^3.",
+                "If a comma is used as a thousands separator, remove it: 1,100 -> 1100, 10,000 -> 10000.",
+                "If a comma is used as a decimal separator, write a point: 1,5 -> 1.5.",
+                "Decide thousands vs decimal from the progression of the other tick labels on the same axis.",
+                "For a categorical x axis (bar charts), the x ticks are the category names under the bars.",
+                # legend / series
+                "SERIES has one line per legend entry, in the order of the legend (top-to-bottom, then left-to-right).",
+                "The series name is the legend text copied character by character: keep hyphens, slashes, '@', '+', "
+                "parentheses, Greek letters (α, β, µ) and sub/superscripts (write them as plain characters, e.g. "
+                "DSPE-PEG2000, Cy5.5, 5-FU, GEM@LNP). Never translate, shorten, correct or complete a name.",
+                "Do not create series from x-axis categories, axis titles, insets or panel labels.",
+                "If the chart has NO legend (a single unnamed series), write exactly one line: "
+                "- name: NO_LEGEND | color: ... | marker: ... | line: ...",
+                # appearance
+                "color: look at the pixels of the legend symbol (or of the data if there is no legend) and give the "
+                "colour as a hex code followed by its name in brackets, e.g. #215968 (dark teal), #C0504D (dark red), "
+                "#9BBB59 (light green). Measure the colour you see; do not use the standard code of a colour name.",
+                "Black, gray and white series: #000000 (black), #7F7F7F (gray) ...",
+                "For bars, the colour is the fill colour of the bar, not its outline.",
+                "marker: one of " + ", ".join(MARKERS) + ". "
+                "A square rotated 45° is a diamond; a triangle pointing down is an inverted triangle; "
+                "a five-pointed shape is a star. Bars have marker none.",
+                "line: solid, dashed, dotted or none (none for bars and for points not joined by a line).",
+                "If something cannot be read, write UNKNOWN. Do not infer or invent missing information.",
+            ]
 
-        return {
-            "expertise": expertise,
-            "initialization": initialization,
-            "definitions": {},
-            "objective": objective,
-            "answer_schema": {
-                "Format": schema,
-                "Rules": "\n".join(f"- {r}" for r in rules),
-            },
-            "conclusion": (
-                "Return ONLY the requested structure. "
-                "Do not include explanations, markdown, headers, or comments."
-            ),
-        }
+            return {
+                "expertise": expertise,
+                "initialization": initialization,
+                "definitions": {},
+                "objective": objective,
+                "answer_schema": {
+                    "Format": schema,
+                    "Rules": "\n".join(f"- {r}" for r in rules),
+                },
+                "conclusion": (
+                    "Return ONLY the requested structure. "
+                    "Do not include explanations, markdown, headers, or comments."
+                ),
+            }
+
 
 class PromptCreationSeriesDataPrompt(BaseModel):
 

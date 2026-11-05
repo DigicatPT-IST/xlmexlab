@@ -538,20 +538,6 @@ class ImageExtractor(BaseModel):
 
         return {image_name: result}
 
-    def extract_series_data_grounded(self, image_path: str, scale: float = 1.0,
-                                 debug_dir: Optional[str] = None) -> Dict[str, Any]:
-        image_name = os.path.basename(image_path)
-
-        # Stage 1 (unchanged): axes, ticks, series identity
-        raw = self.extract_image_info(image_path, scale=scale)[image_name]
-        self._image_parser.parse(raw)
-        parsed = self._image_parser.get_data_dict()
-
-        # Stage 2: pixel grounding + calibration in code
-        result = self._grounder.extract(image_path, parsed, scale=scale, debug_dir=debug_dir)
-        print(f"  [ImageExtractor] calibration: {self._grounder.last_diagnostics}")
-        return {image_name: result}
-
 class SeriesVerifier:
     def __init__(
         self,
