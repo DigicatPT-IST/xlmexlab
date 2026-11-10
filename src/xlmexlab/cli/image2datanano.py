@@ -86,21 +86,6 @@ def image2datanano(
     do_select = mode in ("all", "select")
     do_extract = mode in ("all", "extract")
 
-    if prompt_template_path is None:
-        try:
-            name = vlm_model_name.split("/")[-1]
-            prompt_template_path = TEMPLATE_REGISTRY[name]
-        except KeyError:
-            pass
-    debug_dir = debug_dir or os.path.join(images_chosen_folder, "grounded")
-
-    extractor = ImageExtractor(
-        prompt_template_path=prompt_template_path,
-        prompt_schema_path=prompt_schema_path,
-        vlm_model_name=vlm_model_name,
-        vlm_model_parameters_path=vlm_model_parameters_path,
-    )
-
     if do_extract and not output_file_path:
         raise click.UsageError(f"--mode {mode} needs OUTPUT_FILE_PATH (where the extracted data is saved).")
     if mode == "extract" and not os.path.isdir(images_chosen_folder):
