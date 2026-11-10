@@ -213,7 +213,7 @@ PARAM_META = {
 
     "size_nm": {
         "fields": [
-            "parameter_name", "value", "unit", "sample_code", "size_type", 
+            "parameter_name", "value", "unit", "sample_code", "size_type", "sample_condition", 
         ],
     },
 
@@ -231,7 +231,7 @@ PARAM_META = {
 
     "pdi": {
         "fields": [
-            "parameter_name", "value", "methodology"
+            "parameter_name", "value", "methodology", "sample_code"
         ],
     },
 
@@ -656,21 +656,24 @@ class ParserNanoparticle(BaseModel):
         return results
 
 
+    _NULLISH = {None, "", "null", "none", "unknown", "n/a"}
+
+    def _is_nullish(v):
+        return v is None or str(v).strip().lower() in _NULLISH
+
     def update_schedule(self, T_and_F_list: dict, schedule_raw: str) -> dict:
-        """
-        Parses the raw schedule LLM response and injects 'schedule'
-        into each entry of dose_group, matched by sample_code.
-        """
-        if "dose_group" not in T_and_F_list or not T_and_F_list["dose_group"]:
+        if not T_and_F_list.get("dose_group"):
             return T_and_F_list
 
         parsed = self.parse_schedule_response(schedule_raw)
+        lookup = {self._norm_key(k): v for k, v in parsed.items()}
         print(f"  [PARSER.update_schedule] Parsed schedule: {parsed}")
 
         for entry in T_and_F_list["dose_group"]:
-            sample_code = entry.get("sample_code")
-            entry["schedule"] = parsed.get(sample_code, "unknown")
-            print(f"  [PARSER.update_schedule] {sample_code} → {entry['schedule']}")
+            sc = entry.get("sample_code")
+            key = entry.get("therapeutic_molecule") if _is_nullish(sc) else sc
+            entry["schedule"] = lookup.get(self._norm_key(str(key)), "unknown") if key else "unknown"
+            print(f"  [PARSER.update_schedule] {key} → {entry['schedule']}")
 
         return T_and_F_list
 

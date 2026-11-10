@@ -24,6 +24,8 @@ NON_CARGO_RX = re.compile(
     r"leucine[-\s]?PLGA|polymer|lipid|surfactant)\b", re.I
 )
 
+def _is_nullish(v):
+    return v is None or str(v).strip().lower() in {"", "null", "none", "unknown", "n/a"}
 
 def build_alias_hints(candidates):
     hints = {}
@@ -143,7 +145,7 @@ class NanoparticlesExtractorParagraph(BaseModel):
     def extract_schedule_info(self, text: str, data_response: str):
             # Use data_response directly (it's already a dict from extract_text_info)
             # and check if dose_group is a non-empty list, not True
-            dose_group = data_response.get("dose_group")
+            dose_grsoup = data_response.get("dose_group")
 
             print(f'dose group is {dose_group}')
             
@@ -151,11 +153,12 @@ class NanoparticlesExtractorParagraph(BaseModel):
                 print("  [EXTRACTOR.extract_schedule_info] No dose_group found, skipping.")
                 return None
 
-            sample_codes = [
-                item.get("sample_code")
-                for item in dose_group
-                if item.get("sample_code") is not None
-            ]
+            sample_codes = []
+            for item in dose_group:
+                sc = item.get("sample_code")
+                key = item.get("therapeutic_molecule") if _is_nullish(sc) else sc
+                if key and key not in sample_codes:
+                    sample_codes.append(key)
 
             if not sample_codes:
                 print("  [EXTRACTOR.extract_schedule_info] No drug names found, skipping.")

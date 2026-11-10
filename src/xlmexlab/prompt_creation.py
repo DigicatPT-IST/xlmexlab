@@ -28,7 +28,7 @@ PARAM_META: dict[str, dict] = {
     "size_nm": {
         "description": "Nanoparticle diameter or size explicitly measured in the study",
         "unit_hint": "nm",
-        "specific_format": "size_nm | <value> | <unit> | <sample_code> | <size_type>",
+        "specific_format": "size_nm | <value> | <unit> | <sample_code> | <size_type> | <sample_condition>",
         "field_rules": {
             "<value>": "Numeric size exactly as reported (include ranges , intervals and deviations).",
             "<unit>": "Unit exactly as written in text.",
@@ -42,7 +42,13 @@ PARAM_META: dict[str, dict] = {
                 "'hydrodynamic diameter', 'TEM', 'z-average' "
                 "or other explicitly stated measurement type. "
                 "Use only values explicitly mentioned in the text; if not specified, write 'not extractable."
-            )
+            ),
+            "<sample_condition>": (
+                "State of the sample when the size was measured, as written in the text: e.g. "
+                "'freshly prepared', 'before lyophilisation', 'after lyophilisation', 'after reconstitution', "
+                "'after 56 days at 10 °C', 'in serum'. This is NOT the measurement technique (that is size_type) "
+                "and NOT the preparation method. If not stated, write 'not extractable'."
+            ),
     },
         "exclude": [
             "theoretical sizes",
@@ -105,10 +111,11 @@ PARAM_META: dict[str, dict] = {
     "pdi": {
         "description": "Polydispersity index",
         "unit_hint": "dimensionless",
-        "specific_format": "pdi | <value>| <methodology>",
+          "specific_format": "pdi | <value> | <methodology> | <sample_code>",
         "field_rules": {
             "<value>": "Numeric PDI exactly as reported.",
-            "<methodology>": "Preparation, sample_code, or measurement method asssociated to the reported PDI",
+            "<methodology>": "Preparation or measurement method associated to the PDI (e.g. REV, Bangham, DLS). Not the sample name.",
+            "<sample_code>": "Nanoparticle name the PDI belongs to, exactly as written; if none, write 'not extractable'.",
         },
         "exclude": [],
     },
