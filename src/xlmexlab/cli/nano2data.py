@@ -357,46 +357,98 @@ def process_blocks(blocks, background_ids, regex_extractor, llm_extractor, min_t
     return results, errors
 
 
+def output_name_for(input_name: str) -> str:
+    """'xxx_content.json' -> 'xxx_extracted.json' (falls back to appending _extracted)."""
+    stem, ext = os.path.splitext(input_name)
+    if stem.endswith("_content"):
+        stem = stem[: -len("_content")] + "_extracted"
+    else:
+        stem = stem + "_extracted"
+    return stem + (ext or ".json")
+
+
+def process_file(paragraph_json, output_file_path, regex_extractor, llm_extractor,
+                 min_text_length, skip_llm):
+    start = time.time()
+    print(f"\n{'#'*60}")
+    print(f"FILE: {paragraph_json}")
+    print(f"  Output: {output_file_path}")
+
+    blocks = load_blocks(paragraph_json)
+    print(f"  Loaded {len(blocks)} blocks total.")
+
+    pre_blocks, intro_removed = remove_sections(blocks)
+    merged_blocks = merge_split_paragraphs(pre_blocks)
+    # indices must refer to the same list that process_blocks iterates over
+    background_ids = mark_background(merged_blocks, intro_removed)
+
+    results, error_count = process_blocks(
+        blocks=merged_blocks,
+        background_ids=background_ids,
+        regex_extractor=regex_extractor,
+        llm_extractor=llm_extractor,
+        min_text_length=min_text_length,
+        skip_llm=skip_llm,
+    )
+
+    output = {
+        "source": {
+            "file": os.path.abspath(paragraph_json),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_paragraphs": sum(1 for r in results if r["type"] == "paragraph"),
+        },
+        "results": results,
+    }
+
+    with open(output_file_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    print(f"  Saved. Paragraphs: {output['source']['total_paragraphs']} | "
+          f"Errors: {error_count} | Time (min): {(time.time() - start) / 60:.2f}")
+
+
 @click.command()
-@click.argument("paragraph_json", type=click.Path(exists=True))
-@click.argument("output_file_path", type=click.Path())
+@click.argument("input_folder", type=click.Path(exists=True, file_okay=False))
+@click.argument("output_folder", type=click.Path(file_okay=False))
 @click.option("--prompt_template_path", default=None)
 @click.option("--prompt_schema_path", default=None)
 @click.option("--llm_model_name", default=None)
 @click.option("--llm_model_parameters_path", default=None)
 @click.option("--skip_llm", is_flag=True, default=False)
 @click.option("--min_text_length", type=int, default=200, show_default=True)
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Re-process files whose output already exists.")
 def nanoparticles2data(
-    paragraph_json,
-    output_file_path,
+    input_folder,
+    output_folder,
     prompt_template_path,
     prompt_schema_path,
     llm_model_name,
     llm_model_parameters_path,
     skip_llm,
     min_text_length,
+    overwrite,
 ):
     torch.cuda.empty_cache()
     start = time.time()
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+    input_files = sorted(f for f in os.listdir(input_folder) if f.lower().endswith(".json"))
+
     print("STARTING nanoparticles2data")
-    print(f"  Input:            {paragraph_json}")
-    print(f"  Output:           {output_file_path}")
+    print(f"  Input folder:     {input_folder} ({len(input_files)} json files)")
+    print(f"  Output folder:    {output_folder}")
     print(f"  skip_llm:         {skip_llm}")
     print(f"  min_text_length:  {min_text_length}")
     print(f"  llm_model_name:   {llm_model_name}")
 
-    print("\nLOADING FILE...")
-    blocks = load_blocks(paragraph_json)
-    print(f"  Loaded {len(blocks)} blocks total.")
+    os.makedirs(output_folder, exist_ok=True)
 
-    # Regex extractor 
+    # Extractors are loaded ONCE and reused for every file
     print("\nLOADING REGEX EXTRACTOR...")
     regex_extractor = NanoparticleExtractor()
     print("  Regex extractor ready.")
 
-    # LLM extractor 
     llm_extractor = None
     if skip_llm:
         print("\nLLM EXTRACTOR: skipped (--skip_llm flag)")
@@ -405,8 +457,7 @@ def nanoparticles2data(
         try:
             name = llm_model_name.split("/")[-1]
             prompt_template_path = TEMPLATE_REGISTRY[name]
-
-            print(f'template used: {prompt_template_path}')           
+            print(f'template used: {prompt_template_path}')
 
             llm_extractor = NanoparticlesExtractorParagraph(
                 prompt_template_path=prompt_template_path,
@@ -420,39 +471,31 @@ def nanoparticles2data(
             traceback.print_exc()
             logger.warning(f"LLM disabled: {e}")
 
-    # Process 
-    print("\nSTARTING BLOCK PROCESSING...")
-    pre_blocks, intro_removed = remove_sections(blocks)
-    background_ids = mark_background(blocks, intro_removed)
+    done, skipped, failed = 0, 0, []
+    for i, fname in enumerate(input_files, 1):
+        in_path = os.path.join(input_folder, fname)
+        out_path = os.path.join(output_folder, output_name_for(fname))
+        print(f"\n[{i}/{len(input_files)}] {fname}")
 
-    results, error_count = process_blocks(
-        blocks=merge_split_paragraphs(pre_blocks),
-        background_ids = background_ids,
-        regex_extractor=regex_extractor,
-        llm_extractor=llm_extractor,
-        min_text_length=min_text_length,
-        skip_llm=skip_llm,
-    )
+        if os.path.exists(out_path) and not overwrite:
+            print(f"  Output exists, skipping (use --overwrite to redo).")
+            skipped += 1
+            continue
 
-    # Save
-    output = {
-        "source": {
-            "file": os.path.abspath(paragraph_json),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "total_paragraphs": sum(1 for r in results if r["type"] == "paragraph"),
-        },
-        "results": results,
-    }
-
-    print(f"\nSAVING OUTPUT to {output_file_path}...")
-    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
-    with open(output_file_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+        try:
+            process_file(in_path, out_path, regex_extractor, llm_extractor,
+                         min_text_length, skip_llm)
+            done += 1
+        except Exception as e:
+            print(f"  !! FILE FAILED: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            failed.append(fname)
 
     print(f"\nDONE")
-    print(f"  Paragraphs processed: {output['source']['total_paragraphs']}")
-    print(f"  Errors:               {error_count}")
-    print(f"  Time (min):           {(time.time() - start) / 60:.2f}")
+    print(f"  Files processed: {done}")
+    print(f"  Files skipped:   {skipped}")
+    print(f"  Files failed:    {len(failed)} {failed if failed else ''}")
+    print(f"  Time (min):      {(time.time() - start) / 60:.2f}")
 
 
 def main():
