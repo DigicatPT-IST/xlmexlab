@@ -18,6 +18,7 @@ from xlmexlab.prompt_creation import PromptCreation, PromptCreationImageKeys, Pr
 from xlmexlab.parser_nanoparticles import ParserNanoparticle, ImageParserKeys, SeriesPointsParser
 from xlmexlab.nanoparticle_paragraph import NORMALIZATION_MAP, GENERIC_TERMS, COMPILED_MAP
 from xlmexlab.nanoparticle_paragraph import CARGO_DB, lookup_cargo_category
+from xlmexlab.evaluator_graphs import GraphGrounder, grid_extract, normalize_stage1
 
 NON_CARGO_RX = re.compile(
     r"\b(PLGA|PLA|PEG|conjugate|poloxamer|compritol|mannitol|"
@@ -145,7 +146,7 @@ class NanoparticlesExtractorParagraph(BaseModel):
     def extract_schedule_info(self, text: str, data_response: str):
             # Use data_response directly (it's already a dict from extract_text_info)
             # and check if dose_group is a non-empty list, not True
-            dose_grsoup = data_response.get("dose_group")
+            dose_group = data_response.get("dose_group")
 
             print(f'dose group is {dose_group}')
             
@@ -418,7 +419,8 @@ class ImageExtractor(BaseModel):
     _image_parser: Optional[ImageParserKeys] = PrivateAttr(default=None)
     _series_prompt_builder: Optional[PromptCreationSeriesDataPrompt] = PrivateAttr(default=None)
     _is_graph_prompt_builder: Optional[PromptCreationIsGraphPrompt] = PrivateAttr(default=None)
-    #_grounder: Optional[GraphGrounder] = PrivateAttr(default=None)
+    _grounder: Optional[GraphGrounder] = PrivateAttr(default=None)
+    _verify_prompt_builder: Optional[PromptCreationVerifySeriesPrompt] = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         if self.vlm_model_parameters_path is None:
@@ -449,11 +451,11 @@ class ImageExtractor(BaseModel):
         self._image_parser = ImageParserKeys()
         self._series_prompt_builder = PromptCreationSeriesDataPrompt()
         self._verify_prompt_builder = PromptCreationVerifySeriesPrompt()
-        #self._grounder = GraphGrounder(self._vlm_model,
-        #    self.prompt_template_path,
-        #    coord_mode="norm1000",   # "absolute" for Qwen2.5-VL-style models
-        #    refine=True,
-        #)
+        self._grounder = GraphGrounder(self._vlm_model,
+           self.prompt_template_path,
+           coord_mode="norm1000",   # "absolute" for Qwen2.5-VL-style models
+           refine=True, tick_source="ocr", snap_ticks=True, use_color=True, find_regions=True,
+        )
 
     def is_graph(self, image_path: str, scale: float = 1.0) -> bool:
         prompt_dict = self._is_graph_prompt_builder.build_is_graph_prompt_json()
@@ -539,6 +541,39 @@ class ImageExtractor(BaseModel):
             print(f"\n  [ImageExtractor.extract_series_data] "
                 f"Parsed result for '{image_name}': {result}")
 
+        return {image_name: result}
+
+    def extract_series_data_grid(self, image_path: str, scale: float = 1.0,
+                                debug_dir: Optional[str] = None) -> Dict[str, Any]:
+        image_name = os.path.basename(image_path)
+
+        # Stage 1 (unchanged)
+        raw = self.extract_image_info(image_path, scale=scale)[image_name]
+        self._image_parser.parse(raw)
+        parsed = self._image_parser.get_data_dict()
+
+        # Stage 2: OCR calibration + value grid + one VLM call per series
+        out_dir = debug_dir or os.path.join(os.path.dirname(image_path) or ".", "_grid_debug")
+        out_dir = os.path.join(out_dir, os.path.splitext(image_name)[0])
+        try:
+            r = grid_extract(self._grounder, image_path, parsed, out_dir, scale=scale)
+        except Exception as e:
+            print(f"  [ImageExtractor] grid_extract failed: {type(e).__name__}: {e}")
+            r = {"grid": {}, "pixel": {}, "error": f"{type(e).__name__}: {e}"}
+
+        # use the SAME (normalised) stage 1 that grid_extract used -> names match
+        s1 = normalize_stage1(parsed)
+        grid, pixel = r.get("grid", {}) or {}, r.get("pixel", {}) or {}
+        result = {"x_axis": s1.get("x_axis"), "y_axis": s1.get("y_axis")}
+        for s in s1.get("series", []):
+            name = s.get("name", "UNKNOWN")
+            pts = grid.get(name) or []
+            if not pts and isinstance(pixel.get(name), list):   # fallback to config C
+                pts = pixel[name]
+            result[name] = pts
+
+        print(f"  [ImageExtractor] grid diagnostics: {self._grounder.last_diagnostics} "
+            f"| agreement with pixels: {r.get('agreement')} | error: {r.get('error')}")
         return {image_name: result}
 
 class SeriesVerifier:
