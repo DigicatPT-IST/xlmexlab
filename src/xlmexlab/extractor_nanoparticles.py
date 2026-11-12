@@ -562,7 +562,7 @@ class ImageExtractor(BaseModel):
             r = {"grid": {}, "pixel": {}, "error": f"{type(e).__name__}: {e}"}
 
         # use the SAME (normalised) stage 1 that grid_extract used -> names match
-        s1 = normalize_stage1(parsed)
+        s1 = r.get("stage1") or normalize_stage1(parsed)
         grid, pixel = r.get("grid", {}) or {}, r.get("pixel", {}) or {}
         result = {"x_axis": s1.get("x_axis"), "y_axis": s1.get("y_axis")}
         for s in s1.get("series", []):
