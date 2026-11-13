@@ -428,7 +428,6 @@ class Evaluator_Graphs(BaseModel):
         }
 
 
-
 """
 graph_extraction.py - everything needed for configs C_ocr_color and D_grid_vlm, in ONE file.
 
@@ -2759,13 +2758,15 @@ def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], 
 # ───────────────────────── pipeline ─────────────────────────
 def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: float = 1.0,
                  ask_at_data_x: bool = True, fade_others: bool = True, fuse: bool = True,
-                 number_bars: bool = True, gray_list: Optional[str] = None) -> Dict[str, Any]:
+                 number_bars: bool = True, gray_list: Optional[str] = None,
+                 stage1_raw: Optional[str] = None) -> Dict[str, Any]:
     """Calibrate with GraphGrounder, draw the value grid, ask the VLM ONE series per
     call, and fuse the answer with the pixel result.
 
     grounder : GraphGrounder (its VLM and prompt template are reused)
     fade_others : one grid image PER SERIES in which the other coloured series are faded
                   (<base>_grid_<series name>.png); the plain <base>_grid.png is kept for the overlay.
+    stage1_raw : optional raw VLM text of stage 1, saved in <base>_stage1.json with the parsed dict.
     gray_list : text file that collects the names of black/white charts (to check by hand later);
                 default <parent of out_dir>/grayscale_images.txt, "" = do not write it.
     fuse : keep the pixel value where it agrees with the VLM within one minor grid step.
@@ -2773,6 +2774,7 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     Returns {"grid": {series: [[x, y], ...]}, "grid_vlm": raw VLM points, "sources": {series: [...]},
              "pixel": {...}, "agreement": {...}, "stage1": stage 1 actually used, "grid_image": path, ...}
     """
+    stage1_in = copy.deepcopy(stage1)                 # exactly what the stage-1 parser returned
     stage1 = normalize_stage1(stage1)
     # calibration only: debug_dir=None, so C's *_grounded.png is NOT written into D's folder
     pixel = grounder.extract(image_path, stage1, scale=scale, debug_dir=None)
@@ -2787,9 +2789,11 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     gray = (not is_table) and is_grayscale_image(image_path, cal.get("box"), cal.get("exclude", ()))
     if gray and gray_list:
         note_image(gray_list, os.path.basename(image_path))
+    stage1_path = save_stage1(out_dir, image_path, stage1_in, stage1, stage1_raw)
     if not cal.get("y_map"):
         err = (getattr(grounder, "last_diagnostics", {}) or {}).get("error") or "axis calibration failed"
-        return {"grid": {}, "pixel": pixel, "agreement": {}, "error": err, "stage1": stage1}
+        return {"grid": {}, "pixel": pixel, "agreement": {}, "error": err, "stage1": stage1,
+                "stage1_file": stage1_path}
 
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
@@ -2879,7 +2883,7 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     return {"grid": out, "grid_vlm": vlm_out, "sources": sources, "pixel": pixel, "grayscale": gray,
             "agreement": compare_series(vlm_out, pixel, cal["y_map"]), "stage1": stage1,
             "grid_image": grid_path, "grid_read_image": read_path, "faded_grid_images": faded_paths,
-            "raw_answers": raw_path}
+            "raw_answers": raw_path, "stage1_file": stage1_path}
 
 
 _PALETTE = [(220, 0, 0), (0, 110, 230), (0, 160, 0), (200, 0, 200), (230, 120, 0), (0, 170, 170)]
@@ -3428,3 +3432,23 @@ def note_image(list_path: str, image_name: str) -> None:
                 f.write(image_name + "\n")
     except OSError as e:
         print(f"  [grid_extract] could not write {list_path}: {e}")
+
+
+def save_stage1(out_dir: str, image_path: str, stage1_vlm: Any, stage1_used: Any,
+                stage1_raw: Optional[str] = None) -> Optional[str]:
+    """<base>_stage1.json: the stage-1 result as the VLM gave it ("vlm"), the version the
+    extraction really used ("used": normalised names/units, legend fixes, colours chosen from the
+    plot - see color_vlm / color_legend / color_source per series) and, if given, the raw VLM text."""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        path = os.path.join(out_dir, f"{base}_stage1.json")
+        data = {"image": os.path.basename(image_path), "vlm": stage1_vlm, "used": stage1_used}
+        if stage1_raw is not None:
+            data["raw_text"] = stage1_raw
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_jsonable(data), f, indent=2, ensure_ascii=False)
+        return path
+    except Exception as e:                                  # debug output must never break the run
+        print(f"  [grid_extract] stage 1 not saved: {type(e).__name__}: {e}")
+        return None
