@@ -1351,28 +1351,48 @@ def _region_mask(shape, box: Box, exclude: Sequence[Box]) -> np.ndarray:
     return m
 
 
+def rgb_to_lab(rgb) -> np.ndarray:
+    """sRGB (0-255, shape (..., 3)) -> CIELAB. Distances in Lab follow what the eye sees:
+    pastel yellow vs pastel orange are far apart, a colour vs its anti-aliased edge are close."""
+    c = np.asarray(rgb, float) / 255.0
+    c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
+    m = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]])
+    xyz = c @ m.T / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1)
+
+
+def delta_e(a, b) -> float:
+    """Perceptual distance between two RGB colours (CIE76 Delta E: ~2 just visible, >25 clearly different)."""
+    return float(np.linalg.norm(rgb_to_lab(a) - rgb_to_lab(b)))
+
+
 def dominant_colors(arr: np.ndarray, box: Box, exclude: Sequence[Box] = (),
-                    min_px: int = 40, merge_dist: float = 55.0) -> List[Tuple[np.ndarray, int]]:
-    """Chromatic colours present in the plot area, most frequent first."""
+                    min_px: int = 40, merge_de: float = 12.0, min_chroma: int = 20) -> List[Tuple[np.ndarray, int]]:
+    """Chromatic colours present in the plot area, most frequent first.
+    Bins are merged when they are perceptually close (Lab Delta E < merge_de): the old RGB
+    distance merged pastel yellow into pastel orange (actbio/Fig 56: Conj-HSLN lost its colour)
+    and the chroma cut-off of 50 dropped lavender (HSLN) entirely."""
     region = _region_mask(arr.shape, box, exclude)
     px = arr[region].astype(int)
-    px = px[(px.max(1) - px.min(1)) >= 40]          # skip white / gray / black (40: pastel bars count)
+    px = px[(px.max(1) - px.min(1)) >= min_chroma]   # skip white / gray / black, keep pastel fills
     if len(px) == 0:
         return []
-    q = (px // 16) * 16 + 8
+    q = (px // 8) * 8 + 4
     keys, counts = np.unique(q, axis=0, return_counts=True)
-    clusters: List[List] = []                                   # [weighted_sum, count]
+    labs = rgb_to_lab(keys)
+    clusters: List[List] = []                                   # [seed rgb, count, seed lab]
     for i in np.argsort(-counts):
         if counts[i] < 2:
             break
         c = keys[i].astype(float)
         for cl in clusters:
-            if np.linalg.norm(cl[0] - c) < merge_dist:
+            if np.linalg.norm(cl[2] - labs[i]) < merge_de:
                 cl[1] += int(counts[i])
                 break
         else:
-            clusters.append([c, int(counts[i])])          # seed = most frequent bin
-    clusters.sort(key=lambda c: -c[1])
+            clusters.append([c, int(counts[i]), labs[i]])  # seed = most frequent bin
+    clusters = [[c[0], c[1]] for c in sorted(clusters, key=lambda c: -c[1])]
     # anti-aliased edges are blends of a series colour with the white background:
     # fold every cluster that lies on the segment strong-colour -> white into it
     merged: List[List] = []
@@ -1403,22 +1423,45 @@ def _color_dist(a, b) -> float:
     return dh + 40 * abs(sa - sb) + 30 * abs(va - vb)
 
 
+def colour_match_score(ref, plot_rgb, n_px: int, max_px: int, max_hue: float = 50.0,
+                       max_de: float = 90.0) -> Optional[float]:
+    """How well a plot colour fits the colour stage 1 gave (lower = better, None = no match).
+    Mostly HUE: a VLM says 'orange' / 'blue' or a memorised hex for what is really a pastel or a
+    darker fill, so lightness is unreliable but the hue is right. Lab Delta E breaks ties between
+    colours of the same hue, and small clusters (anti-aliased bar edges, borders) are penalised so
+    the real fill wins over its own dark edge."""
+    hr, sr, _ = _hsv(ref)
+    hp, sp, _ = _hsv(plot_rgb)
+    dh = min(abs(hr - hp), 1 - abs(hr - hp)) * 360
+    de = delta_e(ref, plot_rgb)
+    if dh > max_hue or de > max_de:
+        return None
+    small = 15.0 if n_px < 0.15 * max_px else 0.0
+    return dh + 0.25 * de + small
+
+
 def assign_colors(series_names_colors: List[Tuple[str, str]],
                   palette: List[Tuple[np.ndarray, int]]) -> Dict[str, Optional[np.ndarray]]:
-    """Greedy one-to-one assignment of the colour names from stage 1 to the
-    detected plot colours (by hue). Black/gray series get None (use the VLM)."""
+    """One-to-one assignment of the stage-1 colours (VLM hex / name, or the legend swatch) to the
+    colours REALLY drawn in the plot: the best (series, plot colour) pair is fixed first
+    (colour_match_score), then the next best among what is left, so when two plot colours are
+    similar each series gets the one closest to its own colour. No acceptable plot colour -> None
+    (no pixels, no fading). Black/gray series get None (read by the VLM)."""
     out: Dict[str, Optional[np.ndarray]] = {}
     cands = []
+    big = max((n for _, n in palette), default=1)
     for name, cname in series_names_colors:
         rgb = name_to_rgb(cname)
         if rgb is None or is_achromatic(cname):
             out[name] = None
             continue
-        for j, (c, _) in enumerate(palette):
-            cands.append((_color_dist(rgb, c), name, j))
+        for j, (c, n) in enumerate(palette):
+            sc = colour_match_score(rgb, c, n, big)
+            if sc is not None:
+                cands.append((sc, name, j))
     used = set()
-    for d, name, j in sorted(cands):
-        if name in out or j in used or d > 90:
+    for d, name, j in sorted(cands, key=lambda t: t[0]):
+        if name in out or j in used:
             continue
         out[name] = palette[j][0]
         used.add(j)
@@ -1434,7 +1477,7 @@ def color_mask(arr: np.ndarray, rgb: np.ndarray, region: np.ndarray, tol: float 
     neighbouring hues (red vs orange) without a tight tolerance."""
     a = arr.astype(float)
     d = np.linalg.norm(a - np.asarray(rgb, float), axis=2)
-    m = (d < tol) & region & ((a.max(2) - a.min(2)) >= 35)
+    m = (d < tol) & region & ((a.max(2) - a.min(2)) >= 20)
     if palette:
         others = [np.linalg.norm(a - np.asarray(c, float), axis=2)
                   for c in palette if np.linalg.norm(np.asarray(c, float) - rgb) > 1]
@@ -1847,7 +1890,10 @@ def legend_entries(tokens, names) -> Dict[str, List[Any]]:
     norm = lambda t: re.sub(r"\s+", "", str(t)).lower()
     out: Dict[str, List[Any]] = {}
     for n in [str(n) for n in names if str(n).strip()]:
-        c = [(difflib.SequenceMatcher(None, norm(t.text), norm(n)).ratio(), i, t) for i, t in enumerate(tokens or [])]
+        # a number is a tick label, not legend text (Fig 36: series '1','2','3' = week numbers under
+        # the bars; their "swatch" was read next to the x labels and made week 3 gray)
+        c = [(difflib.SequenceMatcher(None, norm(t.text), norm(n)).ratio(), i, t) for i, t in enumerate(tokens or [])
+             if getattr(t, "num", None) is None]
         c = [x for x in c if x[0] >= 0.75]
         if c:
             out[n] = [t for _, _, t in sorted(c, key=lambda x: (-x[0], x[1]))]
@@ -1875,7 +1921,7 @@ def _swatch(arr: np.ndarray, t, name: str = "") -> Optional[Dict[str, Any]]:
     if x2 - x1 < 3 or y2 - y1 < 3:
         return None
     px = arr[y1:y2, x1:x2].reshape(-1, 3).astype(int)
-    chroma = px[(px.max(1) - px.min(1)) >= 40]
+    chroma = px[(px.max(1) - px.min(1)) >= 20]
     if len(chroma) >= 4:
         sat = chroma.max(1) - chroma.min(1)
         core = chroma[sat >= np.median(sat)]          # core of the symbol, not its anti-aliased rim
@@ -1988,6 +2034,8 @@ class GraphGrounder:
                 ocr_pairs = []
         if len(ocr_pairs) >= 2:                               # exact OCR boxes: no VLM call
             self._tick_source_used[axis] = "ocr"
+            if axis == "x" and not exp:
+                ocr_pairs = complete_categories(ocr_pairs, ticks)
             return self._axis_from_pairs(ocr_pairs, axis, log_hint)
         self._tick_source_used[axis] = "vlm"
         ticks = [str(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")]
@@ -2172,9 +2220,8 @@ class GraphGrounder:
                                                                    [s.get("name", "") for s in stage1["series"]]))
             for s in stage1["series"]:
                 c = legend_cols.get(s.get("name", ""))
-                if c and c["kind"] == "chromatic":        # black/gray symbol: keep the VLM's colour
-                    s["color_vlm"] = s.get("color")
-                    s["color"] = c["hex"]                     # pixels win over the VLM's colour name
+                if c and c["kind"] == "chromatic":        # decided below, once the plot colours are known
+                    s["color_legend"] = c["hex"]
         self.last_stage1 = stage1
 
         x_map, x_anc = self._build_axis(image_path, "x", stage1.get("x_ticks"), space, scale, gray)
@@ -2207,7 +2254,7 @@ class GraphGrounder:
         box = plot_box_from_ticks([a[0] for a in x_anc], [a[1] for a in y_anc], arr.shape,
                                   x_label_y=float(np.median([a[1] for a in x_anc])),
                                   y_label_x=float(np.median([a[0] for a in y_anc])), gray=gray)
-        exclude = []
+        exclude, exclude_info = [], []
         if self.use_color:
             for what in ("legend", "inset plot"):
                 r = None
@@ -2221,10 +2268,14 @@ class GraphGrounder:
                 else:                         # inset = its own tick labels inside the plot box (OCR)
                     r = inset_box_from_tokens(self._ocr_tokens, box, x_anc, y_anc)
                     self.last_diagnostics["inset_source"] = "ocr" if r else "vlm"
+                src = "ocr"
                 if r is None:
-                    r = self._region(what, image_path, space, scale)
+                    r, src = self._region(what, image_path, space, scale), "vlm"
                 if r and not (r[2] < box[0] or r[0] > box[2] or r[3] < box[1] or r[1] > box[3]):
                     exclude.append(r)
+                    exclude_info.append({"what": what.split()[0], "source": src,
+                                         "box": [round(float(v), 1) for v in r]})
+        self.last_diagnostics["excluded_regions"] = exclude_info
         overlay["box"], overlay["exclude"] = box, exclude
         region = _region_mask(arr.shape, box, exclude)
         zero_px = y_map.pixel(0.0) if isinstance(y_map, NumericAxis) and not y_map.log else None
@@ -2233,6 +2284,10 @@ class GraphGrounder:
         masks: Dict[str, np.ndarray] = {}
         if self.use_color and series:
             palette = dominant_colors(arr, box, exclude)
+            choose_series_colors(series, palette)
+            self.last_diagnostics["series_colors"] = {s.get("name"): {k: s.get(k) for k in
+                                                      ("color", "color_vlm", "color_legend", "color_source")}
+                                                      for s in series}
             cmap = assign_colors([(s.get("name", "UNKNOWN"), s.get("color", "")) for s in series], palette)
             pal = [c for c, _ in palette]
             # for fade_other_series: every colour drawn in the plot + which one is whose
@@ -2250,7 +2305,7 @@ class GraphGrounder:
         self.last_masks = masks                 # {series: bool mask of its pixels}
         self.last_calibration = {
             "x_map": x_map if isinstance(x_map, NumericAxis) else None, "y_map": y_map,
-            "box": box, "exclude": exclude,
+            "box": box, "exclude": exclude, "exclude_info": exclude_info,
             "data_x": [round(x_map.value(p), 6) for p in shared_px] if isinstance(x_map, NumericAxis) else [],
             # categorical x (bars): [(pixel, label), ...] so other methods can draw at the category
             "x_cat": [(float(p), str(l)) for p, l in zip(x_map.pix, x_map.labels)]
@@ -2684,7 +2739,7 @@ def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_
     return out_path
 
 
-def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], max_dist: float = 60.0
+def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], max_dist: float = 45.0
                    ) -> Tuple[bool, str]:
     """May the other series be faded for this one? Never when it could fade the target itself:
     * a coloured series whose plot colour was not found (keep_rgb None would fade ALL colours);
@@ -2696,7 +2751,7 @@ def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], 
     want = name_to_rgb(cname)
     if keep_rgb is None:
         return False, "colour of the series not found in the plot"
-    if want is not None and _color_dist(want, keep_rgb) > max_dist:
+    if want is not None and colour_match_score(want, keep_rgb, 1, 1) is None:
         return False, f"plot colour {tuple(int(v) for v in keep_rgb)} far from legend colour {cname}"
     return True, "ok"
 
@@ -2704,13 +2759,15 @@ def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], 
 # ───────────────────────── pipeline ─────────────────────────
 def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: float = 1.0,
                  ask_at_data_x: bool = True, fade_others: bool = True, fuse: bool = True,
-                 number_bars: bool = True) -> Dict[str, Any]:
+                 number_bars: bool = True, gray_list: Optional[str] = None) -> Dict[str, Any]:
     """Calibrate with GraphGrounder, draw the value grid, ask the VLM ONE series per
     call, and fuse the answer with the pixel result.
 
     grounder : GraphGrounder (its VLM and prompt template are reused)
     fade_others : one grid image PER SERIES in which the other coloured series are faded
-                  (<base>_grid_s<i>.png); the plain <base>_grid.png is kept for the overlay.
+                  (<base>_grid_<series name>.png); the plain <base>_grid.png is kept for the overlay.
+    gray_list : text file that collects the names of black/white charts (to check by hand later);
+                default <parent of out_dir>/grayscale_images.txt, "" = do not write it.
     fuse : keep the pixel value where it agrees with the VLM within one minor grid step.
     number_bars : bar series found by colour are numbered #1.. at the top; the VLM reads per number.
     Returns {"grid": {series: [[x, y], ...]}, "grid_vlm": raw VLM points, "sources": {series: [...]},
@@ -2724,6 +2781,12 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     palette = getattr(grounder, "last_palette", []) or []
     series_rgb = getattr(grounder, "last_series_rgb", {}) or {}
     points_px = getattr(grounder, "last_points_px", {}) or {}
+    if gray_list is None:
+        gray_list = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "grayscale_images.txt")
+    is_table = (getattr(grounder, "last_diagnostics", {}) or {}).get("error") == "looks like a table"
+    gray = (not is_table) and is_grayscale_image(image_path, cal.get("box"), cal.get("exclude", ()))
+    if gray and gray_list:
+        note_image(gray_list, os.path.basename(image_path))
     if not cal.get("y_map"):
         err = (getattr(grounder, "last_diagnostics", {}) or {}).get("error") or "axis calibration failed"
         return {"grid": {}, "pixel": pixel, "agreement": {}, "error": err, "stage1": stage1}
@@ -2745,12 +2808,15 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     vlm_out: Dict[str, Any] = {}
     out: Dict[str, Any] = {}
     sources: Dict[str, List[str]] = {}
-    raw_log: Dict[str, Any] = {"guides": {"source": guide_source, "data_x": data_x}, "series": {}}
+    raw_log: Dict[str, Any] = {"guides": {"source": guide_source, "data_x": data_x}, "grayscale": gray,
+                               "excluded_regions": cal.get("exclude_info", []), "series": {}}
     faded_paths: Dict[str, str] = {}
     bar_px: Dict[str, Dict[str, float]] = {}            # {series: {category: x pixel}} for the overlay
     all_series = stage1.get("series", [])
+    tags = series_file_tags([s.get("name", "UNKNOWN") for s in all_series])
     for i, s in enumerate(all_series):
         name = s.get("name", "UNKNOWN")
+        tag = tags[i]
         ask_path, faded, note = grid_path, False, None
         # numbered bars (bar charts read by colour): exact x of every bar of this series
         marks, bar_labels = [], []
@@ -2763,12 +2829,12 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
         if fade_others and len(all_series) > 1 and palette:
             ok, note = fade_target_ok(s, series_rgb.get(name))
             if ok:
-                tmp = os.path.join(out_dir, f"{base}_faded_s{i}.png")
+                tmp = os.path.join(out_dir, f"{base}_faded_{tag}.png")
                 if fade_other_series(image_path, palette, series_rgb.get(name), cal["box"],
                                      cal.get("exclude", ()), tmp):
                     src_img, faded = tmp, True
         if faded or marks:
-            ask_path = os.path.join(out_dir, f"{base}_grid_s{i}.png")
+            ask_path = os.path.join(out_dir, f"{base}_grid_{tag}.png")
             draw_value_grid(src_img, ask_path, x_map, cal["y_map"], cal["box"],
                             exclude=cal.get("exclude", ()), x_positions=data_x or None, marks=marks)
         if faded:
@@ -2785,8 +2851,9 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
             bar_px[name] = {str(lab): xp for (xp, _), lab in zip(marks, bar_labels)}
         elif x_map is not None and data_x:              # numeric x: snap to the guides
             pts = snap_x_to_guides(pts, data_x, drop_far=(guide_source == "colour markers"))
-        elif x_map is None:                             # categorical x: fuzzy category names
-            pts = match_categories(pts, [lab for _, lab in cal.get("x_cat", [])])
+        elif x_map is None:                             # categorical x: category names
+            pts = match_categories(pts, [lab for _, lab in cal.get("x_cat", [])],
+                                   extra=[str(t) for t in stage1.get("x_ticks") or [] if t not in (None, "")])
         vlm_out[name] = pts
         if fuse:
             out[name], sources[name] = fuse_with_pixels(pts, pixel.get(name), g, x_map, data_x)
@@ -2809,7 +2876,7 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
             json.dump(_jsonable(raw_log), f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"  [grid_extract] raw answers not saved: {type(e).__name__}: {e}")
-    return {"grid": out, "grid_vlm": vlm_out, "sources": sources, "pixel": pixel,
+    return {"grid": out, "grid_vlm": vlm_out, "sources": sources, "pixel": pixel, "grayscale": gray,
             "agreement": compare_series(vlm_out, pixel, cal["y_map"]), "stage1": stage1,
             "grid_image": grid_path, "grid_read_image": read_path, "faded_grid_images": faded_paths,
             "raw_answers": raw_path}
@@ -2864,6 +2931,20 @@ def draw_grid_answers(grid_path: str, out_path: str, answers: Dict[str, List], g
         p = cats.get(str(x).strip().lower())
         return None if p is None else p + slot_dx
 
+    # excluded regions (legend / inset): no grid and no pixel points there -> dashed orange box
+    for info in cal.get("exclude_info", []) or [{"what": "excluded", "source": "", "box": b}
+                                                 for b in cal.get("exclude", [])]:
+        bx = info["box"]
+        x1, y1, x2, y2 = [v * k for v in bx]
+        x1, x2, y1, y2 = x1 + ox, x2 + ox, y1 + oy, y2 + oy
+        for a, b in (((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)), ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))):
+            L = max(1.0, math.hypot(b[0] - a[0], b[1] - a[1]))
+            for t0 in np.arange(0, L, 12):
+                t1 = min(L, t0 + 7)
+                d.line([a[0] + (b[0] - a[0]) * t0 / L, a[1] + (b[1] - a[1]) * t0 / L,
+                        a[0] + (b[0] - a[0]) * t1 / L, a[1] + (b[1] - a[1]) * t1 / L], fill=(255, 140, 0), width=2)
+        lab = f"excluded: {info['what']}" + (f" ({info['source']})" if info.get("source") else "")
+        d.text((x1 + 3, max(oy, y1 - 16)), lab, fill=(230, 110, 0), font=font)
     for i, (name, pts) in enumerate(answers.items()):
         dx = (i - (n - 1) / 2) * (0.8 * step / n) if n_bar_series > 1 else 0.0  # grouped bars only
         col = col_for(i, name)
@@ -2982,22 +3063,35 @@ def bars_to_categories(pts: List[List[Any]], bar_labels: Sequence[Any]) -> List[
     return out
 
 
-def match_categories(pts: List[List[Any]], cats: Sequence[str]) -> List[List[Any]]:
-    """VLM category names -> the axis category names (fuzzy; 'Placebo - Liver' -> 'Placebo')."""
-    if not cats:
+def match_categories(pts: List[List[Any]], cats: Sequence[str], extra: Sequence[str] = ()) -> List[List[Any]]:
+    """VLM category names -> the axis category names.
+    1) exact (case-insensitive) matches first - against the calibrated axis categories AND the
+       stage-1 x ticks (OCR can miss a label: 'HSLN' was then fuzzily turned into 'Conj-HSLN');
+    2) then a close spelling match (ratio >= 0.8) to a category that no other answer uses;
+    3) otherwise the VLM's label is KEPT as written - never moved onto a different category."""
+    allc, seen = [], set()
+    for c in list(cats) + list(extra):
+        k = str(c).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            allc.append(str(c))
+    if not allc:
         return pts
-    low = [str(c).strip().lower() for c in cats]
+    low = [c.strip().lower() for c in allc]
+    keys = [str(x).strip().lower() for x, _ in pts]
+    used = {k for k in keys if k in low}
     out = []
-    for x, y in pts:
-        xs = str(x).strip().lower()
-        if xs in low:
-            out.append([cats[low.index(xs)], y])
+    for (x, y), k in zip(pts, keys):
+        if k in low:
+            out.append([allc[low.index(k)], y])
             continue
-        m = difflib.get_close_matches(xs, low, n=1, cutoff=0.6)
-        if not m:
-            m = [c for c in low if c and (c in xs or xs in c)][:1]
+        free = [c for c in low if c not in used]
+        m = difflib.get_close_matches(k, free, n=1, cutoff=0.8)
         if m:
-            out.append([cats[low.index(m[0])], y])
+            used.add(m[0])
+            out.append([allc[low.index(m[0])], y])
+        else:
+            out.append([x, y])
     return out
 
 
@@ -3245,3 +3339,92 @@ def dark_marker_columns(image_path: str, box: Box, exclude: Sequence[Box] = (), 
             groups.append([x])
     cols = [float(np.mean(g)) for g in groups]
     return cols if 3 <= len(cols) <= 40 else []
+
+
+def choose_series_colors(series: List[Dict[str, Any]], palette: List[Tuple[np.ndarray, int]],
+                         legend_max_de: float = 15.0) -> None:
+    """Which colour describes each series (in place)? The VLM's colour (hex or name) is the default.
+    The legend swatch read from the pixels replaces it ONLY when that swatch colour is really drawn
+    in the plot (Delta E <= legend_max_de to a plot colour): a swatch read next to the wrong text
+    (an x label, a border) is then ignored. Sets s["color"], keeps s["color_vlm"], s["color_source"]."""
+    pal = [c for c, _ in palette]
+    for s in series:
+        s.setdefault("color_vlm", s.get("color"))
+        leg = s.get("color_legend")
+        rgb = name_to_rgb(leg) if leg else None
+        if rgb is not None and not is_achromatic(leg) and pal and min(delta_e(rgb, c) for c in pal) <= legend_max_de:
+            s["color"], s["color_source"] = leg, "legend"
+        else:
+            s["color"], s["color_source"] = s.get("color_vlm"), "vlm"
+
+
+def complete_categories(pairs: List[Tuple[float, float, str]], ticks: Sequence[Any],
+                        max_resid: float = 0.2) -> List[Tuple[float, float, str]]:
+    """OCR found only some category labels: place the missing stage-1 categories by their index.
+    Category centres are evenly spaced, so position = a * index + b is fitted on the labels that
+    were found (exact stage-1 spelling, in the right order); used only if that fit is good."""
+    cats = [str(t) for t in ticks or [] if t not in (None, "", "UNKNOWN")]
+    if len(cats) < 3 or len(pairs) < 2 or len(pairs) >= len(cats):
+        return pairs
+    low = [c.strip().lower() for c in cats]
+    idx = []
+    for cx, cy, t in pairs:
+        k = str(t).strip().lower()
+        if k not in low:
+            return pairs
+        idx.append(low.index(k))
+    if len(set(idx)) != len(idx) or idx != sorted(idx):
+        return pairs
+    xs = np.array([p[0] for p in pairs], float)
+    a, b = np.polyfit(np.array(idx, float), xs, 1)
+    if a <= 0 or np.max(np.abs(a * np.array(idx) + b - xs)) > max_resid * a:
+        return pairs
+    cy = float(np.median([p[1] for p in pairs]))
+    out = list(pairs)
+    for i, c in enumerate(cats):
+        if i not in idx:
+            out.append((float(a * i + b), cy, c))
+    print(f"  [GraphGrounder] categories added by position: {[c for i, c in enumerate(cats) if i not in idx]}")
+    return sorted(out, key=lambda p: p[0])
+
+
+def series_file_tags(names: Sequence[str], max_len: int = 40) -> List[str]:
+    """Series name -> safe file-name part ('Conj-HSLN' -> 'Conj-HSLN', '% ID/g' -> 'ID_g').
+    Two series that give the same tag get _2, _3 ...; an empty tag becomes s<index>."""
+    out, seen = [], {}
+    for i, n in enumerate(names):
+        t = re.sub(r"[^A-Za-z0-9.+-]+", "_", str(n)).strip("._")[:max_len] or f"s{i}"
+        if t.lower() in ("read", "raw"):                   # would clash with <base>_grid_read.png
+            t = f"series_{t}"
+        k = t.lower()
+        seen[k] = seen.get(k, 0) + 1
+        out.append(t if seen[k] == 1 else f"{t}_{seen[k]}")
+    return out
+
+
+def is_grayscale_image(image_path: str, box: Optional[Box] = None, exclude: Sequence[Box] = (),
+                       min_chroma: int = 40, max_frac: float = 0.002) -> bool:
+    """Black/white chart: (almost) no coloured pixel in the plot area (whole image if the plot box
+    is unknown). Coloured = channel spread >= min_chroma; JPEG noise and anti-aliasing stay below."""
+    arr = np.asarray(Image.open(image_path).convert("RGB")).astype(int)
+    h, w = arr.shape[:2]
+    region = _region_mask(arr.shape, box or (0, 0, w, h), exclude)
+    px = arr[region]
+    if len(px) == 0:
+        return False
+    return float(((px.max(1) - px.min(1)) >= min_chroma).mean()) < max_frac
+
+
+def note_image(list_path: str, image_name: str) -> None:
+    """Add an image name to a text list (one name per line, no duplicates)."""
+    try:
+        have = set()
+        if os.path.exists(list_path):
+            with open(list_path, encoding="utf-8") as f:
+                have = {l.strip() for l in f if l.strip()}
+        if image_name not in have:
+            os.makedirs(os.path.dirname(os.path.abspath(list_path)), exist_ok=True)
+            with open(list_path, "a", encoding="utf-8") as f:
+                f.write(image_name + "\n")
+    except OSError as e:
+        print(f"  [grid_extract] could not write {list_path}: {e}")

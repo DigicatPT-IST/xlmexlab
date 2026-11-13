@@ -556,7 +556,7 @@ class ImageExtractor(BaseModel):
         out_dir = debug_dir or os.path.join(os.path.dirname(image_path) or ".", "_grid_debug")
         out_dir = os.path.join(out_dir, os.path.splitext(image_name)[0])
         try:
-            r = grid_extract(self._grounder, image_path, parsed, out_dir, scale=scale)
+            r = grid_extract(self._grounder, image_path, parsed, out_dir, scale=scale, stage1_raw=raw)
         except Exception as e:
             print(f"  [ImageExtractor] grid_extract failed: {type(e).__name__}: {e}")
             r = {"grid": {}, "pixel": {}, "error": f"{type(e).__name__}: {e}"}
