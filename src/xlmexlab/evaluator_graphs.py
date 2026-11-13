@@ -429,1982 +429,53 @@ class Evaluator_Graphs(BaseModel):
 
 
 """
-graph_extraction.py - everything needed for configs C_ocr_color and D_grid_vlm, in ONE file.
+Grid-assisted direct extraction with a small VLM.
 
-Merged from (no code changes, only the cross-file imports removed):
-    1. grounding_utils.py        prompts, JSON/number parsing, coordinates, axis calibration
-    2. ocr_ticks.py              tick labels from OCR (tesseract or rapidocr)
-    3. graph_color_digitizer.py  data points read from the pixels by colour
-    4. graph_grounder.py         GraphGrounder (calibration + config C) + normalize_stage1
-    5. grid_overlay.py           value grid + VLM reading (config D: grid_extract)
-    6. checks added after the images_debug review (Nov 2026), see "6. ROBUSTNESS"
+Idea: small VLMs read a value much better when there is a labelled line next to
+the point than when they must interpolate between two far-apart tick labels.
+So, after calibrating the axes (in code), we draw a dense grid IN DATA UNITS
+and print the value of every major line at the image border, then ask the VLM
+to read the series.
 
-Changes after the images_debug review (Nov 2026)
-    * grid_extract FUSES the VLM reading with the pixel (config C) points: when both agree within
-      one minor grid step the pixel value is kept (no more values snapped to grid lines);
-      per-point source in result["sources"] ("pixel" | "vlm").
-    * numeric x answers are snapped to the data x positions (dashed guides); points far from
-      every guide are dropped. Black/gray charts get guides from the dark markers.
-    * fading: the series being read is never faded (colour check against its legend swatch).
-    * insets: excluded from OCR (second set of numeric tick labels inside the plot box).
-    * tables: detected from OCR (>= 3 rows x 3 columns of numbers) and not extracted.
-    * legend: stage-1 names fixed from the OCR legend ('Thymus' -> 'Thyroid'), missing series
-      added (legend texts with a coloured symbol that stage 1 did not list).
-    * bar charts: every bar found by colour is numbered (#1, #2 ...) in the top margin and the
-      VLM gives the height per number (no more category-name matching).
-    * plot box: always contains every y tick label; snapped to the frame line when present.
-    * debug: overlay in the series' real colours, pixel points drawn as crosses, legend in a
-      top band, raw VLM answers saved to <base>_raw.json.
-    IMPORTANT for extractor_nanoparticles.py: series names can change (legend fix), so use
-    r["stage1"] (returned by grid_extract) instead of normalize_stage1(parsed).
+Rules that make the grid help instead of hurt
+- non-data ink is painted white first (see "annotation filter" below), so neither
+  the digitizer nor the VLM can mistake an annotation for a data point;
+- the grid is painted only on background pixels, so markers, lines and error
+  bars are never covered;
+- gridlines are neutral gray (never a series colour), minor lines lighter;
+- labels go in a white margin outside the figure, never on top of the data;
+- the image is upscaled first (small figures are the main source of error);
+- ask ONE series per call (or one x position per call), never "all series".
 
-Use in extractor_nanoparticles.py:
-    from xlmexlab.graph_extraction import GraphGrounder, grid_extract
+The annotation filter removes, inside the plot area only:
+- significance brackets (thin isolated horizontal rules + the legs at their ends);
+- '*', '**', '***', '#', 'n.s.', 'p<0.05';
+- rows of identical glyphs at a constant y (a '+ + + +' row is an annotation,
+  not a flat series: a flat series is drawn with a connecting line);
+- tall solid coloured glyphs such as dosing arrows, which otherwise steal a
+  series colour and become its "data points".
 
-Requirements: numpy, pillow, scipy, and one OCR backend:
-    pip install rapidocr_onnxruntime            (or: tesseract program + pip install pytesseract)
+Typical use (after GraphGrounder has calibrated the axes):
+    g = draw_value_grid(image_path, out_path, x_map, y_map, box)
+    prompt_dict = build_grid_read_prompt(series, g)
+    raw = vlm.run_image_single_prompt_rescale(prompt, out_path)
+    pts = parse_grid_answer(raw)
+
+or, end to end, grid_extract(grounder, image_path, stage1, out_dir).
 """
-import copy
-import difflib
-import json
 import math
 import os
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-from xlmexlab.prompt import PromptFormatter
-
-try:
-    import pytesseract
-except ImportError:                                       # pragma: no cover
-    pytesseract = None
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. GROUNDING UTILS - prompts, parsing, coordinates, axis calibration
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ───────────────────────── prompts ─────────────────────────
-def _prompt(expertise: str, objective: str, schema: str, rules: List[str]) -> dict:
-    return {
-        "expertise": expertise,
-        "initialization": "",
-        "definitions": {},
-        "objective": objective,
-        "answer_schema": {
-            "Format": schema,
-            "Rules": "\n".join(f"- {r}" for r in rules),
-        },
-        "conclusion": "Return ONLY the JSON list. No explanations, markdown, headers, or comments.",
-    }
-
-
-def build_tick_locator_prompt(axis: str, ticks: List[str]) -> dict:
-    return _prompt(
-        expertise="You are an expert at precisely localizing text in scientific figures.",
-        objective=(
-            f"Locate the tick labels of the {axis}-axis in the image. "
-            f"The tick labels, in order, are: {ticks}."
-        ),
-        schema='[{"label": "<tick text exactly as in the list>", "bbox_2d": [x1, y1, x2, y2]}, ...]',
-        rules=[
-            "Return one entry per tick label that is visible in the image.",
-            "bbox_2d must tightly enclose the tick label text only (not the axis title, not the legend).",
-            "Use the label text exactly as given in the list.",
-            "Do not invent labels that are not visible.",
-        ],
-    )
-
-
-def build_points_prompt(name: str, color: str, marker: str, line: str) -> dict:
-    return _prompt(
-        expertise="You are an expert at precisely localizing data markers in scientific graphs.",
-        objective=(
-            f'Locate every data marker of the series "{name}" '
-            f"(color={color}, marker={marker}, line={line})."
-        ),
-        schema='[{"point_2d": [x, y], "label": "<series name>"}, ...]',
-        rules=[
-            "Return the CENTER of each marker.",
-            "One entry per marker, ordered left to right.",
-            "Do NOT add points along the connecting line; only actual markers.",
-            "Ignore markers of other series and legend symbols.",
-        ],
-    )
-
-
-def build_bars_prompt(name: str, color: str) -> dict:
-    return _prompt(
-        expertise="You are an expert at precisely localizing bars in scientific bar charts.",
-        objective=f'Locate every bar of the series "{name}" (color={color}).',
-        schema='[{"bbox_2d": [x1, y1, x2, y2], "label": "<series name>"}, ...]',
-        rules=[
-            "bbox_2d must tightly enclose the bar rectangle only (exclude error bars and labels).",
-            "One entry per bar, ordered left to right.",
-            "Ignore bars of other series and legend swatches.",
-        ],
-    )
-
-
-# ───────────────────────── parsing ─────────────────────────
-_LIST_RX = re.compile(r"\[.*\]", re.S)
-
-
-def parse_json_list(text: str) -> List[dict]:
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
-    text = re.sub(r"```(?:json)?", "", text)
-    m = _LIST_RX.search(text)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        data = []
-        for obj in re.findall(r"\{[^{}]*\}", m.group(0)):
-            try:
-                data.append(json.loads(obj))
-            except json.JSONDecodeError:
-                pass
-    return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
-
-
-def to_float(s: Any) -> Optional[float]:
-    s = str(s).replace("−", "-").replace("–", "-").replace(",", "").replace("%", "").strip()
-    m = re.search(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", s)
-    return float(m.group()) if m else None
-
-
-def _norm_label(s: str) -> str:
-    return re.sub(r"\s+", "", str(s).replace("−", "-")).lower()
-
-
-# ───────────────────────── coordinates ─────────────────────────
-class CoordSpace:
-    """Converts model coordinates to ORIGINAL image pixels."""
-
-    def __init__(self, width: int, height: int, mode: str = "norm1000", scale: float = 1.0):
-        self.w, self.h, self.mode, self.scale = width, height, mode, scale
-
-    def px(self, v: float, axis: str) -> float:
-        if self.mode == "norm1000":
-            return v / 1000.0 * (self.w if axis == "x" else self.h)
-        return v / self.scale  # "absolute": pixels of the (rescaled) image fed to the model
-
-    def bbox(self, b: List[float]):
-        x1, y1, x2, y2 = b
-        x1, x2 = sorted((self.px(x1, "x"), self.px(x2, "x")))
-        y1, y2 = sorted((self.px(y1, "y"), self.px(y2, "y")))
-        return x1, y1, x2, y2
-
-
-# ───────────────────────── axis calibration ─────────────────────────
-class NumericAxis:
-    def __init__(self, pix: List[float], vals: List[float], log_hint: Optional[bool] = None):
-        """log_hint=True: the OCR / stage 1 says the axis is logarithmic (needed when only
-        2 ticks are readable: 2 points always fit a straight line perfectly)."""
-        lin = self._fit(pix, vals, log=False)
-        best, self.log = lin, False
-        if min(vals) > 0:
-            lg = self._fit(pix, vals, log=True)
-            if log_hint and max(vals) / min(vals) >= 10:
-                best, self.log = lg, True
-            elif len(vals) >= 3 and lin["err"] > 0.01 and lg["err"] < 0.5 * lin["err"]:
-                best, self.log = lg, True
-        self.a, self.b, self.err = best["a"], best["b"], best["err"]
-        self.n_used = int(best["keep"].sum())
-        self.n_total = len(vals)
-
-    @staticmethod
-    def _fit(pix, vals, log):
-        p = np.asarray(pix, float)
-        v = np.log10(np.asarray(vals, float)) if log else np.asarray(vals, float)
-        keep = np.ones(len(p), bool)
-        for _ in range(2):                       # drop up to 2 outlier ticks
-            if keep.sum() < 3:
-                break
-            a, b = np.polyfit(p[keep], v[keep], 1)
-            res = np.abs(a * p + b - v)
-            worst = int(np.argmax(np.where(keep, res, -1)))
-            if res[worst] / (np.ptp(v[keep]) or 1.0) > 0.05:
-                keep[worst] = False
-            else:
-                break
-        a, b = np.polyfit(p[keep], v[keep], 1)
-        err = float(np.sqrt(np.mean((a * p[keep] + b - v[keep]) ** 2)) / (np.ptp(v[keep]) or 1.0))
-        return {"a": a, "b": b, "err": err, "keep": keep}
-
-    def value(self, p: float) -> float:
-        v = self.a * p + self.b
-        return float(10 ** v) if self.log else float(v)
-
-    def pixel(self, v: float) -> float:
-        if self.log:
-            v = np.log10(v)
-        return float((v - self.b) / self.a)
-
-    def info(self):
-        return {"type": "log" if self.log else "linear", "rel_rmse": round(self.err, 5),
-                "ticks_used": f"{self.n_used}/{self.n_total}"}
-
-
-class CategoricalAxis:
-    def __init__(self, pix: List[float], labels: List[str]):
-        self.pix, self.labels = np.asarray(pix, float), labels
-
-    def value(self, p: float) -> str:
-        return self.labels[int(np.argmin(np.abs(self.pix - p)))]
-
-    def info(self):
-        return {"type": "categorical", "n": len(self.labels)}
-
-
-# ───────────────────────── refinement ─────────────────────────
-def snap_to_marker(arr: np.ndarray, x: float, y: float, radius: int = 12, tol: float = 40.0):
-    """Move (x, y) to the centroid of pixels with the same color as the VLM's point."""
-    h, w, _ = arr.shape
-    xi, yi = int(round(x)), int(round(y))
-    if not (0 <= xi < w and 0 <= yi < h):
-        return x, y
-    ref = np.median(arr[max(0, yi - 2):yi + 3, max(0, xi - 2):xi + 3].reshape(-1, 3), axis=0)
-    if ref.min() > 235:                          # landed on background -> don't trust a snap
-        return x, y
-    X0, X1 = max(0, xi - radius), min(w, xi + radius + 1)
-    Y0, Y1 = max(0, yi - radius), min(h, yi + radius + 1)
-    patch = arr[Y0:Y1, X0:X1].astype(float)
-    mask = np.linalg.norm(patch - ref, axis=2) < tol
-    if mask.sum() < 4:
-        return x, y
-    ys, xs = np.nonzero(mask)
-    return X0 + xs.mean(), Y0 + ys.mean()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. OCR TICKS - tick labels with exact text boxes (tesseract or rapidocr)
-# ═══════════════════════════════════════════════════════════════════════════
-NUM_WHITELIST = "0123456789.,-%eE^x×"
-_RAPID = None
-
-
-def _rapid():
-    global _RAPID
-    if _RAPID is None:
-        try:
-            from rapidocr_onnxruntime import RapidOCR
-        except ImportError:
-            from rapidocr import RapidOCR                  # newer package name
-        _RAPID = RapidOCR()
-    return _RAPID
-
-
-def _tesseract_ok() -> bool:
-    if pytesseract is None:
-        return False
-    try:
-        pytesseract.get_tesseract_version()
-        return True
-    except Exception:
-        return False
-
-
-def resolve_backend(backend: str = "auto") -> str:
-    if backend != "auto":
-        return backend
-    if _tesseract_ok():
-        return "tesseract"
-    try:
-        _rapid()
-        return "rapidocr"
-    except Exception as e:
-        raise ImportError("No OCR backend: install the tesseract program + pytesseract, "
-                          "or `pip install rapidocr_onnxruntime`") from e
-
-
-def _rapid_run(arr: np.ndarray) -> List[Tuple[List, str, float]]:
-    """RapidOCR on an RGB array -> [(polygon, text, score)], for old and new package versions."""
-    out = _rapid()(arr)
-    if isinstance(out, tuple):                           # rapidocr_onnxruntime: (result, elapse)
-        res = out[0] or []
-        return [(r[0], str(r[1]), float(r[2])) for r in res]
-    boxes = getattr(out, "boxes", None)                  # rapidocr >= 2: RapidOCROutput
-    if boxes is None:
-        return []
-    return [(b, str(t), float(sc)) for b, t, sc in zip(boxes, out.txts, out.scores)]
-
-
-def _engine_words(ocr_img: Image.Image, backend: str) -> List[Tuple[str, float, float, float, float, float]]:
-    """(text, x1, y1, x2, y2, conf 0-100) in ocr_img pixels."""
-    words = []
-    if backend == "tesseract":
-        d = pytesseract.image_to_data(ocr_img, config="--psm 11", output_type=pytesseract.Output.DICT)
-        for i, txt in enumerate(d["text"]):
-            if txt.strip():
-                x, y, w, h = d["left"][i], d["top"][i], d["width"][i], d["height"][i]
-                words.append((txt.strip(), x, y, x + w, y + h, float(d["conf"][i])))
-        return words
-    arr = np.stack([np.array(ocr_img.convert("L"))] * 3, axis=-1)
-    for poly, txt, sc in _rapid_run(arr):
-        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
-        parts = txt.split()
-        # RapidOCR returns whole lines: split "10 20 30" into separate numbers
-        if len(parts) > 1 and all(parse_number(p) is not None for p in parts) and (x2 - x1) > (y2 - y1):
-            n_chars = len(txt)
-            pos = 0
-            for ptxt in parts:
-                start = txt.index(ptxt, pos)
-                pos = start + len(ptxt)
-                words.append((ptxt, x1 + (x2 - x1) * start / n_chars, y1,
-                              x1 + (x2 - x1) * pos / n_chars, y2, sc * 100))
-        else:
-            words.append((txt.strip(), x1, y1, x2, y2, sc * 100))
-    return words
-
-
-def _read_crop_texts(crop: Image.Image, backend: str) -> List[Tuple[str, float]]:
-    """Read a small crop as a number -> [(text, conf)]."""
-    crop = ImageOps.expand(crop, border=16, fill=255)
-    if backend == "tesseract":
-        out = []
-        for psm in (7, 8, 10):
-            d = pytesseract.image_to_data(crop, config=f"--psm {psm} -c tessedit_char_whitelist={NUM_WHITELIST}",
-                                          output_type=pytesseract.Output.DICT)
-            ws = [(d["text"][i], float(d["conf"][i])) for i in range(len(d["text"])) if d["text"][i].strip()]
-            if ws:
-                out.append(("".join(w for w, _ in ws), float(np.mean([c for _, c in ws]))))
-        return out
-    out = []
-    rec = getattr(_rapid(), "text_recognizer", None)     # recogniser only: no detector, so single
-    if rec is not None:                                  # digits ('0', '4') are read too
-        try:
-            tight = ImageOps.expand(crop.crop((8, 12, crop.width - 8, crop.height - 12)), border=(8, 4), fill=255)
-            r = rec([np.stack([np.array(tight.convert("L"))] * 3, axis=-1)])
-            r = r[0] if isinstance(r, tuple) else r
-            out += [(str(t), 100 * float(sc)) for t, sc in r if str(t).strip()]
-        except Exception:
-            pass
-    res = _rapid_run(np.stack([np.array(crop.convert("L"))] * 3, axis=-1))
-    if res:
-        out.append(("".join(t for _, t, _ in res), 100 * float(np.mean([sc for _, _, sc in res]))))
-    return out
-
-
-@dataclass
-class Token:
-    text: str
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    conf: float
-    num: Optional[float] = None
-
-    @property
-    def cx(self): return (self.x1 + self.x2) / 2
-
-    @property
-    def cy(self): return (self.y1 + self.y2) / 2
-
-    @property
-    def h(self): return self.y2 - self.y1
-
-
-# ───────────────────────── number parsing ─────────────────────────
-_SUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
-_FIX = str.maketrans({"O": "0", "o": "0", "l": "1", "I": "1", "|": "1", "S": "5", "−": "-", "–": "-", "—": "-"})
-
-
-def parse_number(text: str) -> Optional[float]:
-    """'1,000' '0.5' '0,5' '-20' '−20' '75%' '10³' '10^3' '1e3' '1×10^3' -> float."""
-    t = text.strip().replace(" ", "")
-    if not t:
-        return None
-    t = t.translate(_FIX).replace("%", "")
-    # powers of ten need an explicit marker: 10^3, 10^{3}, 10³, 10⁻², 2x10^3, or '10-2' (OCR of 10⁻²).
-    # A plain '100' / '1000' / '105' is an ordinary number (the old pattern read '100' as 10^0 = 1).
-    m = (re.fullmatch(r"(?:(-?\d+(?:\.\d+)?)[x×*])?10(?:\^\{?|\{)(-?\d{1,2})\}?", t)
-         or re.fullmatch(r"(?:(-?\d+(?:\.\d+)?)[x×*])?10([⁰¹²³⁴⁵⁶⁷⁸⁹⁻]{1,3})", t)
-         or re.fullmatch(r"()10(-\d{1,2})", t))
-    if m:
-        mant = float(m.group(1)) if m.group(1) else 1.0
-        return mant * 10 ** float(m.group(2).translate(_SUP))
-    t = t.translate(_SUP)
-    if re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", t):   # thousands separators
-        t = t.replace(",", "")
-    elif re.fullmatch(r"-?\d+,\d+", t):                   # decimal comma
-        t = t.replace(",", ".")
-    try:
-        return float(t)
-    except ValueError:
-        return None
-
-
-# ───────────────────────── OCR ─────────────────────────
-def _remove_lines(gray: np.ndarray, dark: int = 140) -> np.ndarray:
-    """Erase axis lines, frames and gridlines (they glue to labels and confuse OCR)."""
-    d = gray < dark
-    lines = ndimage.binary_opening(d, structure=np.ones((1, 30))) | \
-            ndimage.binary_opening(d, structure=np.ones((30, 1)))
-    rest = d & ~lines
-    # tick marks: small thin pieces that touch an axis line (minus signs never touch it)
-    lab, n = ndimage.label(rest)
-    touch = ndimage.binary_dilation(lines, iterations=1)
-    ticks = np.zeros_like(d)
-    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
-        if sl is None:
-            continue
-        comp = lab[sl] == i
-        h, w = comp.shape
-        if min(h, w) <= 3 and max(h, w) <= 12 and (touch[sl] & comp).any():
-            ticks[sl] |= comp
-    out = gray.copy()
-    out[lines | ticks] = 255
-    return out
-
-
-def _to_ocr_image(img: Image.Image, scale: int) -> Image.Image:
-    g = np.array(img.convert("L"))
-    g = _remove_lines(g)
-    im = Image.fromarray(g).resize((img.width * scale, img.height * scale), Image.LANCZOS)
-    return ImageOps.autocontrast(im)
-
-
-def _read_number_crop(ocr_img: Image.Image, t: Token, scale: int, backend: str) -> Tuple[Optional[str], float]:
-    """Re-read one token as a single number."""
-    pad = max(4, int(0.5 * t.h * scale))
-    box = (max(0, int(t.x1 * scale) - pad), max(0, int(t.y1 * scale) - pad),
-           min(ocr_img.width, int(t.x2 * scale) + pad), min(ocr_img.height, int(t.y2 * scale) + pad))
-    reads = [r for r in _read_crop_texts(ocr_img.crop(box), backend) if parse_number(r[0]) is not None]
-    if not reads:
-        return None, -1
-    return max(reads, key=lambda r: r[1])
-
-
-def ocr_tokens(image_path: str, scale: int = 3, min_conf: float = 0, backend: str = "auto") -> List[Token]:
-    """All text tokens with exact boxes in ORIGINAL image pixels.
-    Adjacent words on one line are merged ('Free DOX', '2,000'); number-like tokens
-    are re-read on their own, which fixes '10¢'->'100', 'O'->'0', etc."""
-    backend = resolve_backend(backend)
-    img = Image.open(image_path).convert("RGB")
-    ocr_img = _to_ocr_image(img, scale)
-
-    words: List[Token] = []
-    for txt, x1, y1, x2, y2, conf in _engine_words(ocr_img, backend):
-        if conf < min_conf:
-            continue
-        x1, y1, x2, y2 = x1 / scale, y1 / scale, x2 / scale, y2 / scale
-        if (y2 - y1) < 4 or (x2 - x1) < 2:
-            continue
-        words.append(Token(txt, x1, y1, x2, y2, conf))
-
-    # merge words on the same line that are close together
-    words.sort(key=lambda t: (round(t.cy / 4), t.x1))
-    merged: List[Token] = []
-    for t in words:
-        if merged:
-            p = merged[-1]
-            same_line = abs(p.cy - t.cy) < 0.5 * max(p.h, t.h)
-            gap = t.x1 - p.x2
-            numeric = parse_number(p.text) is not None or parse_number(t.text) is not None \
-                or re.fullmatch(r"[-–—_.]+", t.text) is not None
-            if same_line and -2 < gap < 0.6 * max(p.h, t.h) and not numeric:
-                merged[-1] = Token(p.text + ("" if gap < 0.25 * p.h else " ") + t.text,
-                                   min(p.x1, t.x1), min(p.y1, t.y1), max(p.x2, t.x2), max(p.y2, t.y2),
-                                   min(p.conf, t.conf))
-                continue
-        merged.append(t)
-
-    for t in merged:
-        t.num = parse_number(t.text)
-        looks_numeric = sum(c.isdigit() for c in t.text) >= max(1, len(t.text) // 2) or \
-            re.fullmatch(r"[\dOolIS.,%\-−¢()]+", t.text) is not None
-        if t.num is None or (looks_numeric and t.conf < 85):
-            txt2, conf2 = _read_number_crop(ocr_img, t, scale, backend)
-            n2 = parse_number(txt2) if txt2 else None
-            if n2 is not None and (t.num is None or conf2 > t.conf):
-                t.text, t.num, t.conf = txt2, n2, conf2
-    return merged
-
-
-# ───────────────────────── tick selection ─────────────────────────
-def _cluster(values: Sequence[float], tol: float) -> List[List[int]]:
-    order = np.argsort(values)
-    groups: List[List[int]] = []
-    for i in order:
-        if groups and abs(values[i] - values[groups[-1][-1]]) <= tol:
-            groups[-1].append(int(i))
-        else:
-            groups.append([int(i)])
-    return [g for g in groups if len(g) >= 2]
-
-
-def _consistent_numeric(toks: List[Token], axis: str) -> Tuple[List[Token], float, bool]:
-    """Largest subset whose numbers fit a line (or log line) against pixel position
-    with the right direction. Returns (subset, relative rmse, is_log)."""
-    nums = [t for t in toks if t.num is not None]
-    # one label per position (keep the most confident)
-    nums.sort(key=lambda t: -t.conf)
-    uniq: List[Token] = []
-    for t in nums:
-        if all(abs((t.cx if axis == "x" else t.cy) - (u.cx if axis == "x" else u.cy)) > 2 for u in uniq):
-            uniq.append(t)
-    if len(uniq) < 2:
-        return [], 1.0, False
-    fits = {}
-    for log in (False, True):
-        if log and (any(t.num <= 0 for t in uniq) or len(uniq) < 3):
-            continue
-        keep = list(uniq)
-        while len(keep) >= 2:
-            p = np.array([t.cx if axis == "x" else t.cy for t in keep])
-            v = np.array([math.log10(t.num) if log else t.num for t in keep])
-            if np.ptp(v) == 0:
-                keep = []
-                break
-            a, b = np.polyfit(p, v, 1)
-            if (axis == "x" and a <= 0) or (axis == "y" and a >= 0):
-                keep = []                                   # wrong direction: not this axis
-                break
-            res = np.abs(a * p + b - v) / np.ptp(v)
-            if res.max() <= 0.03 or len(keep) == 2:
-                break
-            keep.pop(int(np.argmax(res)))
-        if len(keep) >= 2:
-            p = np.array([t.cx if axis == "x" else t.cy for t in keep])
-            v = np.array([math.log10(t.num) if log else t.num for t in keep])
-            a, b = np.polyfit(p, v, 1)
-            fits[log] = (keep, float(np.sqrt(np.mean(((a * p + b - v) / np.ptp(v)) ** 2))))
-    if not fits:
-        return [], 1.0, False
-    lin, lg = fits.get(False), fits.get(True)
-    if lg and (not lin or len(lg[0]) > len(lin[0])
-               or (len(lg[0]) == len(lin[0]) and lin[1] > 0.01 and lg[1] < 0.5 * lin[1])):
-        return lg[0], lg[1], True
-    return lin[0], lin[1], False
-
-
-def _expected_match(toks: List[Token], expected: Sequence[str]) -> int:
-    if not expected:
-        return 0
-    exp_nums = {parse_number(e) for e in expected} - {None}
-    n = 0
-    for t in toks:
-        if t.num is not None and t.num in exp_nums:
-            n += 1
-        elif difflib.get_close_matches(t.text.lower(), [e.lower() for e in expected], n=1, cutoff=0.75):
-            n += 1
-    return n
-
-
-def _pick_axis(tokens: List[Token], axis: str, expected: Sequence[str], size: Tuple[int, int],
-               allowed: Optional[set] = None) -> Tuple[List[Token], Dict[str, Any]]:
-    W, H = size
-    cand = [t for i, t in enumerate(tokens) if allowed is None or i in allowed]
-    if not cand:
-        return [], {"reason": "no tokens"}
-    hmed = float(np.median([t.h for t in cand]))
-    if axis == "x":
-        groups = _cluster([t.cy for t in cand], tol=0.5 * hmed)
-    else:   # right-aligned labels; also try left edge (right-hand axes / left-aligned labels)
-        groups = _cluster([t.x2 for t in cand], tol=max(4.0, 0.7 * hmed)) + \
-                 _cluster([t.x1 for t in cand], tol=max(4.0, 0.7 * hmed))
-    numeric_expected = expected and sum(parse_number(e) is not None for e in expected) >= len(expected) / 2
-
-    best, best_score, best_info = [], -1e9, {}
-    for g in groups:
-        toks = [cand[i] for i in g]
-        if numeric_expected or not expected:
-            sub, err, log = _consistent_numeric(toks, axis)
-            if len(sub) < 2:
-                continue
-            pos = [t.cx if axis == "x" else t.cy for t in sub]
-            span = (max(pos) - min(pos)) / (W if axis == "x" else H)
-            score = len(sub) + 1.5 * _expected_match(sub, expected) + 3 * span - 5 * err
-            info = {"type": "log" if log else "linear", "rel_rmse": round(err, 4)}
-        else:                                               # categorical (bar chart)
-            exp_l = [e.lower() for e in expected]
-            sub = [t for t in toks if difflib.get_close_matches(t.text.lower(), exp_l, n=1, cutoff=0.7)]
-            if len(sub) < 2:
-                continue
-            pos = [t.cx for t in sub]
-            span = (max(pos) - min(pos)) / W
-            score = 2 * len(sub) + 3 * span
-            info = {"type": "categorical"}
-        # tick labels sit at the bottom (x) / left (y) of the main plot more often than not
-        score += 0.5 * (np.mean([t.cy for t in sub]) / H if axis == "x" else 1 - np.mean([t.cx for t in sub]) / W)
-        if score > best_score:
-            best, best_score, best_info = sub, score, info
-    best_info["n"] = len(best)
-    return sorted(best, key=lambda t: t.cx if axis == "x" else t.cy), best_info
-
-
-def _canonical_text(t: Token, expected: Sequence[str]) -> str:
-    """Return the stage-1 spelling when it matches (keeps your tick strings stable)."""
-    for e in expected or []:
-        n = parse_number(e)
-        if t.num is not None and n is not None and abs(n - t.num) <= 1e-9 * max(1, abs(n)):
-            return e
-    m = difflib.get_close_matches(t.text, list(expected or []), n=1, cutoff=0.7)
-    return m[0] if m else (t.text if t.num is None else repr(t.num).rstrip("0").rstrip("."))
-
-
-def locate_ticks(tokens: List[Token], stage1: Dict[str, Any], size: Tuple[int, int],
-                 vlm_labels: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
-    """Choose x and y tick labels among OCR tokens.
-    vlm_labels: optional {token_index: label} from classify_tokens_with_vlm()."""
-    out: Dict[str, Any] = {"x": [], "y": [], "info": {}}
-    for axis in ("x", "y"):
-        expected = [str(t) for t in (stage1.get(f"{axis}_ticks") or []) if t not in (None, "", "UNKNOWN")]
-        allowed = None
-        if vlm_labels:
-            allowed = {i for i, lab in vlm_labels.items() if lab == f"{axis}_tick"}
-            if len(allowed) < 2:
-                allowed = None                              # VLM unhelpful -> geometry only
-        toks, info = _pick_axis(tokens, axis, expected, size, allowed)
-        picked = [(t.cx, t.cy, _canonical_text(t, expected)) for t in toks]
-        if len(picked) < min(3, len(expected)):
-            by_order = _assign_by_order(tokens, axis, expected, size)
-            if len(by_order) > len(picked):
-                picked, info = by_order, {"type": "by_order", "n": len(by_order)}
-        out[axis] = picked
-        out["info"][axis] = info
-    return out
-
-
-def _assign_by_order(tokens: List[Token], axis: str, expected: Sequence[str],
-                     size: Tuple[int, int]) -> List[Tuple[float, float, str]]:
-    """Fallback for unreadable but well-placed labels (log axes: '10⁻²' read as '1077').
-    Takes the row (x) / column (y) of number-like tokens with exactly as many labels as
-    stage 1 listed, evenly spaced, and assigns the stage-1 values in order."""
-    vals = [(parse_number(e), e) for e in expected or []]
-    vals = [v for v in vals if v[0] is not None]
-    if len(vals) < 3:
-        return []
-    W, H = size
-    numeric = [t for t in tokens if re.match(r"^[-−–]?\d", t.text.strip())]
-    if len(numeric) < len(vals):
-        return []
-    hmed = float(np.median([t.h for t in numeric]))
-    groups = _cluster([t.cy for t in numeric], 0.5 * hmed) if axis == "x" else \
-        _cluster([t.x2 for t in numeric], max(4.0, 0.7 * hmed))
-    best, best_score = [], None
-    for g in groups:
-        toks = sorted((numeric[i] for i in g), key=lambda t: t.cx if axis == "x" else t.cy)
-        if len(toks) != len(vals):
-            continue
-        pos = np.array([t.cx if axis == "x" else t.cy for t in toks])
-        d = np.diff(pos)
-        if d.mean() <= 0 or d.std() / d.mean() > 0.08:        # labels must be evenly spaced
-            continue
-        where = np.mean([t.cy for t in toks]) / H if axis == "x" else 1 - np.mean([t.cx for t in toks]) / W
-        if best_score is None or where > best_score:
-            best, best_score = toks, where
-    if not best:
-        return []
-    ordered = sorted(vals, key=lambda v: v[0])                # ascending values
-    if axis == "y":
-        ordered = ordered[::-1]                               # top of the image = largest value
-    return [(t.cx, t.cy, e) for t, (_, e) in zip(best, ordered)]
-
-
-# ───────────────────────── optional: VLM classification ─────────────────────────
-TOKEN_LABELS = ["x_tick", "y_tick", "x_title", "y_title", "legend", "panel_label", "inset", "annotation", "other"]
-
-
-def draw_token_marks(image_path: str, tokens: List[Token], out_path: str, zoom: int = 2) -> str:
-    """Numbered red boxes around every OCR token (set-of-marks image for the VLM)."""
-    img = Image.open(image_path).convert("RGB")
-    img = img.resize((img.width * zoom, img.height * zoom), Image.LANCZOS)
-    d = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 12)
-    except OSError:
-        font = ImageFont.load_default()
-    for i, t in enumerate(tokens):
-        b = [t.x1 * zoom - 2, t.y1 * zoom - 2, t.x2 * zoom + 2, t.y2 * zoom + 2]
-        d.rectangle(b, outline=(230, 0, 0), width=2)
-        d.text((b[0], b[1] - 13), str(i), fill=(230, 0, 0), font=font)
-    img.save(out_path)
-    return out_path
-
-
-def build_token_classification_prompt(tokens: List[Token]) -> dict:
-    listing = "\n".join(f"{i} | {t.text}" for i, t in enumerate(tokens))
-    return {
-        "expertise": "You are an expert at reading the layout of scientific charts.",
-        "initialization": "",
-        "definitions": {},
-        "objective": ("Every text in the image has a red box with a number. For each number, say what the "
-                      f"text is. Allowed labels: {', '.join(TOKEN_LABELS)}.\n"
-                      "x_tick / y_tick = tick labels of the MAIN plot axes only. Tick labels of a small "
-                      "inset plot are 'inset'.\nTexts:\n" + listing),
-        "answer_schema": {"Format": "number | label   (one line per text)",
-                          "Rules": "- One line for every number.\n- Use only the allowed labels."},
-        "conclusion": "Return ONLY the lines. No explanations.",
-    }
-
-
-def parse_token_labels(text: str, n_tokens: int) -> Dict[int, str]:
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
-    out = {}
-    for line in text.splitlines():
-        m = re.match(r"\s*(\d+)\s*[|:\-]\s*([a-z_]+)", line.strip().lower())
-        if m and int(m.group(1)) < n_tokens and m.group(2) in TOKEN_LABELS:
-            out[int(m.group(1))] = m.group(2)
-    return out
-
-
-def classify_tokens_with_vlm(vlm, prompt_template_path: Optional[str], image_path: str,
-                             tokens: List[Token], work_path: str) -> Dict[int, str]:
-    marked = draw_token_marks(image_path, tokens, work_path)
-    fm = PromptFormatter(**build_token_classification_prompt(tokens))
-    fm.model_post_init(prompt_template_path)
-    raw = vlm.run_image_single_prompt_rescale(fm.format_prompt("<image>"), marked, scale=1.0)
-    print(f"\n  [ocr_ticks] token labels RAW:\n{raw}")
-    return parse_token_labels(raw, len(tokens))
-
-
-# ───────────────────────── gap filling ─────────────────────────
-def _read_crop_variants(images: List[Image.Image], box_px: Tuple[float, float, float, float],
-                        scale: int, backend: str = "auto") -> List[str]:
-    """Read one small region as a number, on the cleaned image and on the raw one
-    (line removal can cut a '0' at the origin)."""
-    backend = resolve_backend(backend)
-    out = []
-    x1, y1, x2, y2 = [int(round(v * scale)) for v in box_px]
-    for im in images:
-        crop = im.crop((max(0, x1), max(0, y1), min(im.width, x2), min(im.height, y2)))
-        if crop.width < 4 or crop.height < 4:
-            continue
-        out += [t for t, _ in _read_crop_texts(crop, backend)]
-    return out
-
-
-def fill_missing_ticks(image_path: str, picked: List[Tuple[float, float, str]], axis: str,
-                       expected: Sequence[str], scale: int = 3, max_extend: int = 3,
-                       backend: str = "auto") -> List[Tuple[float, float, str]]:
-    """Predict where the missing tick labels must be (from the labels already found)
-    and re-read only those spots. A reading is accepted only if it equals the value
-    the axis fit predicts there, so a wrong OCR can never enter the calibration."""
-    vals = [parse_number(t) for _, _, t in picked]
-    if len(picked) < 2 or any(v is None for v in vals):
-        return picked
-    pos = np.array([p[0] if axis == "x" else p[1] for p in picked])
-    v = np.array(vals, float)
-    log = bool(np.all(v > 0) and len(v) >= 3 and
-               np.std(np.diff(np.log10(np.sort(v)))) < 0.05 * np.ptp(np.log10(v)) < np.std(np.diff(np.sort(v))))
-    vv = np.log10(v) if log else v
-    a, b = np.polyfit(pos, vv, 1)
-
-    exp_vals = sorted({parse_number(e) for e in expected or []} - {None})
-    if len(exp_vals) >= 2:
-        candidates = exp_vals
-    else:
-        sv = np.sort(vv)
-        step = float(np.min(np.diff(sv))) if len(sv) > 1 else 0
-        if step <= 0:
-            return picked
-        lo, hi = sv[0] - max_extend * step, sv[-1] + max_extend * step
-        k = np.arange(round(lo / step), round(hi / step) + 1)
-        candidates = [float(10 ** (s * step)) if log else round(float(s * step), 10) for s in k]
-    have = set(np.round(v, 9))
-
-    img = Image.open(image_path).convert("RGB")
-    W, H = img.size
-    clean = _to_ocr_image(img, scale)
-    raw = ImageOps.autocontrast(img.convert("L").resize((W * scale, H * scale), Image.LANCZOS))
-    hh = 12.0                                              # typical label height in px
-    if axis == "x":
-        cy = float(np.median([p[1] for p in picked]))
-        widths = 2.5 * hh
-    else:
-        cx = float(np.median([p[0] for p in picked]))
-        half_w = max(1.6 * hh, 0.5 * max(len(t) for _, _, t in picked) * 0.7 * hh)
-
-    added = list(picked)
-    for val in candidates:
-        if round(val, 9) in have:
-            continue
-        p = ((math.log10(val) if log else val) - b) / a
-        if axis == "x":
-            if not (0 <= p < W):
-                continue
-            box = (p - widths / 2, cy - hh, p + widths / 2, cy + hh)
-        else:
-            if not (0 <= p < H):
-                continue
-            box = (cx - half_w - 8, p - hh * 0.9, cx + half_w + 4, p + hh * 0.9)
-        for txt in _read_crop_variants([clean, raw], box, scale, backend):
-            n = parse_number(txt)
-            if n is not None and abs(n - val) <= 1e-9 * max(1.0, abs(val)):
-                label = next((e for e in expected or [] if parse_number(e) == val), txt)
-                added.append((p, cy, label) if axis == "x" else (cx, p, label))
-                break
-    key = 0 if axis == "x" else 1
-    return sorted(added, key=lambda q: q[key])
-
-
-def find_ticks(image_path: str, stage1: Dict[str, Any], scale: int = 3, fill_gaps: bool = True,
-               vlm_labels: Optional[Dict[int, str]] = None, tokens: Optional[List[Token]] = None,
-               backend: str = "auto") -> Dict[str, Any]:
-    """OCR + selection + gap filling. Returns {"x": [(cx, cy, text)], "y": [...], "info": {...}}."""
-    backend = resolve_backend(backend)
-    tokens = tokens if tokens is not None else ocr_tokens(image_path, scale=scale, backend=backend)
-    size = Image.open(image_path).size
-    res = locate_ticks(tokens, stage1, size, vlm_labels)
-    if fill_gaps:
-        for axis in ("x", "y"):
-            if res["info"].get(axis, {}).get("type") in ("linear", "log"):
-                expected = [str(t) for t in (stage1.get(f"{axis}_ticks") or []) if t not in (None, "", "UNKNOWN")]
-                before = len(res[axis])
-                res[axis] = fill_missing_ticks(image_path, res[axis], axis, expected, scale, backend=backend)
-                res["info"][axis]["filled"] = len(res[axis]) - before
-    res["info"]["backend"] = backend
-    return res
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. COLOUR DIGITIZER - data points read from the pixels by colour
-# ═══════════════════════════════════════════════════════════════════════════
-Box = Tuple[float, float, float, float]          # x1, y1, x2, y2 (pixels)
-
-NAMED_RGB = {
-    "red": (220, 40, 40), "dark red": (150, 30, 30), "maroon": (128, 0, 0),
-    "brown": (150, 80, 50), "orange": (245, 140, 20), "yellow": (240, 200, 0),
-    "gold": (230, 180, 20), "olive": (130, 140, 40), "green": (40, 160, 60),
-    "light green": (150, 200, 90), "dark green": (20, 100, 40), "lime": (120, 220, 40),
-    "teal": (30, 100, 110), "dark teal": (30, 90, 100), "cyan": (0, 190, 220),
-    "turquoise": (60, 200, 200), "light blue": (100, 170, 230), "sky blue": (110, 180, 235),
-    "blue": (30, 70, 220), "dark blue": (20, 40, 140), "navy": (20, 30, 110),
-    "purple": (130, 50, 160), "violet": (150, 80, 200), "magenta": (230, 0, 230),
-    "pink": (240, 120, 170), "salmon": (240, 130, 110), "gray": (128, 128, 128),
-    "grey": (128, 128, 128), "black": (0, 0, 0),
-}
-ACHROMATIC = {"black", "gray", "grey", "white", "dark gray", "dark grey", "light gray", "light grey"}
-
-
-# ───────────────────────── colour helpers ─────────────────────────
-def _css_colors() -> Dict[str, str]:
-    try:
-        from matplotlib.colors import CSS4_COLORS
-        return CSS4_COLORS
-    except Exception:
-        return {}
-
-
-_CSS = _css_colors()
-
-
-def name_to_rgb(name: str) -> Optional[Tuple[int, int, int]]:
-    """Colour as stage 1 wrote it -> RGB. Accepts our names ('dark teal'), hex codes
-    ('#B22222', '#fa0'), rgb(178,34,34) and CSS names ('firebrick', 'dark slate gray')."""
-    n = (name or "").strip().lower()
-    if not n or n in ("unknown", "none", "-"):
-        return None
-    m = re.search(r"#([0-9a-f]{6}|[0-9a-f]{3})\b", n)        # '#1F77B4 (blue)', 'blue (#1f77b4)'
-    if not m:
-        m = re.fullmatch(r"#?([0-9a-f]{6}|[0-9a-f]{3})", n)
-        m = m if m and re.search(r"\d", n) else None
-    if m:
-        h = m.group(1)
-        if len(h) == 3:
-            h = "".join(c * 2 for c in h)
-        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-    m = re.fullmatch(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+).*\)", n)
-    if m:
-        return tuple(min(255, int(v)) for v in m.groups())
-    if n in NAMED_RGB:
-        return NAMED_RGB[n]
-    css = _CSS.get(n.replace(" ", "").replace("-", "").replace("grey", "gray"))
-    if css:
-        return name_to_rgb(css)
-    hits = [k for k in sorted(NAMED_RGB, key=len, reverse=True) if k in n]
-    return NAMED_RGB[hits[0]] if hits else None
-
-
-def is_achromatic(name: str) -> bool:
-    """Black / gray / white, whether written as a name or as a code like '#333333'."""
-    n = (name or "").strip().lower()
-    if n in ACHROMATIC or any(a == n for a in ACHROMATIC):
-        return True
-    rgb = name_to_rgb(n)
-    if rgb is None:
-        return False
-    import colorsys
-    _, sat, val = colorsys.rgb_to_hsv(*[c / 255 for c in rgb])
-    return sat < 0.15 or val < 0.15
-
-
-def _region_mask(shape, box: Box, exclude: Sequence[Box]) -> np.ndarray:
-    h, w = shape[:2]
-    m = np.zeros((h, w), bool)
-    x1, y1, x2, y2 = [int(round(v)) for v in box]
-    m[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = True
-    for ex in exclude or []:
-        a, b, c, d = [int(round(v)) for v in ex]
-        m[max(0, b):min(h, d), max(0, a):min(w, c)] = False
-    return m
-
-
-def rgb_to_lab(rgb) -> np.ndarray:
-    """sRGB (0-255, shape (..., 3)) -> CIELAB. Distances in Lab follow what the eye sees:
-    pastel yellow vs pastel orange are far apart, a colour vs its anti-aliased edge are close."""
-    c = np.asarray(rgb, float) / 255.0
-    c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
-    m = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]])
-    xyz = c @ m.T / np.array([0.95047, 1.0, 1.08883])
-    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
-    return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1)
-
-
-def delta_e(a, b) -> float:
-    """Perceptual distance between two RGB colours (CIE76 Delta E: ~2 just visible, >25 clearly different)."""
-    return float(np.linalg.norm(rgb_to_lab(a) - rgb_to_lab(b)))
-
-
-def dominant_colors(arr: np.ndarray, box: Box, exclude: Sequence[Box] = (),
-                    min_px: int = 40, merge_de: float = 12.0, min_chroma: int = 20) -> List[Tuple[np.ndarray, int]]:
-    """Chromatic colours present in the plot area, most frequent first.
-    Bins are merged when they are perceptually close (Lab Delta E < merge_de): the old RGB
-    distance merged pastel yellow into pastel orange (actbio/Fig 56: Conj-HSLN lost its colour)
-    and the chroma cut-off of 50 dropped lavender (HSLN) entirely."""
-    region = _region_mask(arr.shape, box, exclude)
-    px = arr[region].astype(int)
-    px = px[(px.max(1) - px.min(1)) >= min_chroma]   # skip white / gray / black, keep pastel fills
-    if len(px) == 0:
-        return []
-    q = (px // 8) * 8 + 4
-    keys, counts = np.unique(q, axis=0, return_counts=True)
-    labs = rgb_to_lab(keys)
-    clusters: List[List] = []                                   # [seed rgb, count, seed lab]
-    for i in np.argsort(-counts):
-        if counts[i] < 2:
-            break
-        c = keys[i].astype(float)
-        for cl in clusters:
-            if np.linalg.norm(cl[2] - labs[i]) < merge_de:
-                cl[1] += int(counts[i])
-                break
-        else:
-            clusters.append([c, int(counts[i]), labs[i]])  # seed = most frequent bin
-    clusters = [[c[0], c[1]] for c in sorted(clusters, key=lambda c: -c[1])]
-    # anti-aliased edges are blends of a series colour with the white background:
-    # fold every cluster that lies on the segment strong-colour -> white into it
-    merged: List[List] = []
-    for c, n in clusters:
-        for m in merged:
-            s_ = m[0]
-            t = float(np.dot(c - s_, 255 - s_) / max(1e-6, np.dot(255 - s_, 255 - s_)))
-            if 0 <= t <= 0.85 and np.linalg.norm(s_ + t * (255 - s_) - c) < 28:
-                m[1] += n
-                break
-        else:
-            merged.append([c, n])
-    merged = [m for m in merged if m[1] >= min_px]
-    return [(m[0], m[1]) for m in sorted(merged, key=lambda c: -c[1])]
-
-
-def _hsv(rgb) -> Tuple[float, float, float]:
-    import colorsys
-    r, g, b = [float(v) / 255 for v in rgb]
-    return colorsys.rgb_to_hsv(r, g, b)
-
-
-def _color_dist(a, b) -> float:
-    """Hue-first distance between two colours (robust to light/dark variants)."""
-    ha, sa, va = _hsv(a)
-    hb, sb, vb = _hsv(b)
-    dh = min(abs(ha - hb), 1 - abs(ha - hb)) * 360
-    return dh + 40 * abs(sa - sb) + 30 * abs(va - vb)
-
-
-def colour_match_score(ref, plot_rgb, n_px: int, max_px: int, max_hue: float = 50.0,
-                       max_de: float = 90.0) -> Optional[float]:
-    """How well a plot colour fits the colour stage 1 gave (lower = better, None = no match).
-    Mostly HUE: a VLM says 'orange' / 'blue' or a memorised hex for what is really a pastel or a
-    darker fill, so lightness is unreliable but the hue is right. Lab Delta E breaks ties between
-    colours of the same hue, and small clusters (anti-aliased bar edges, borders) are penalised so
-    the real fill wins over its own dark edge."""
-    hr, sr, _ = _hsv(ref)
-    hp, sp, _ = _hsv(plot_rgb)
-    dh = min(abs(hr - hp), 1 - abs(hr - hp)) * 360
-    de = delta_e(ref, plot_rgb)
-    if dh > max_hue or de > max_de:
-        return None
-    small = 15.0 if n_px < 0.15 * max_px else 0.0
-    return dh + 0.25 * de + small
-
-
-def assign_colors(series_names_colors: List[Tuple[str, str]],
-                  palette: List[Tuple[np.ndarray, int]]) -> Dict[str, Optional[np.ndarray]]:
-    """One-to-one assignment of the stage-1 colours (VLM hex / name, or the legend swatch) to the
-    colours REALLY drawn in the plot: the best (series, plot colour) pair is fixed first
-    (colour_match_score), then the next best among what is left, so when two plot colours are
-    similar each series gets the one closest to its own colour. No acceptable plot colour -> None
-    (no pixels, no fading). Black/gray series get None (read by the VLM)."""
-    out: Dict[str, Optional[np.ndarray]] = {}
-    cands = []
-    big = max((n for _, n in palette), default=1)
-    for name, cname in series_names_colors:
-        rgb = name_to_rgb(cname)
-        if rgb is None or is_achromatic(cname):
-            out[name] = None
-            continue
-        for j, (c, n) in enumerate(palette):
-            sc = colour_match_score(rgb, c, n, big)
-            if sc is not None:
-                cands.append((sc, name, j))
-    used = set()
-    for d, name, j in sorted(cands, key=lambda t: t[0]):
-        if name in out or j in used:
-            continue
-        out[name] = palette[j][0]
-        used.add(j)
-    for name, _ in series_names_colors:
-        out.setdefault(name, None)
-    return out
-
-
-def color_mask(arr: np.ndarray, rgb: np.ndarray, region: np.ndarray, tol: float = 70.0,
-               palette: Optional[List[np.ndarray]] = None) -> np.ndarray:
-    """Pixels of this series' colour. With `palette` (all detected series colours) a
-    pixel is kept only if this colour is its nearest one, which separates
-    neighbouring hues (red vs orange) without a tight tolerance."""
-    a = arr.astype(float)
-    d = np.linalg.norm(a - np.asarray(rgb, float), axis=2)
-    m = (d < tol) & region & ((a.max(2) - a.min(2)) >= 20)
-    if palette:
-        others = [np.linalg.norm(a - np.asarray(c, float), axis=2)
-                  for c in palette if np.linalg.norm(np.asarray(c, float) - rgb) > 1]
-        if others:
-            m &= d <= np.min(others, axis=0)
-    lab, n = ndimage.label(m)                                   # drop specks, keep thin lines
-    if n:
-        sizes = ndimage.sum(m, lab, range(1, n + 1))
-        m &= np.isin(lab, np.flatnonzero(sizes >= 4) + 1)
-    return m
-
-
-# ───────────────────────── extraction ─────────────────────────
-def _runs(flags: np.ndarray, min_len: int = 1, max_gap: int = 0) -> List[Tuple[int, int]]:
-    idx = np.flatnonzero(flags)
-    if len(idx) == 0:
-        return []
-    runs, s, p = [], idx[0], idx[0]
-    for i in idx[1:]:
-        if i - p > max_gap + 1:
-            if p - s + 1 >= min_len:
-                runs.append((s, p))
-            s = i
-        p = i
-    if p - s + 1 >= min_len:
-        runs.append((s, p))
-    return runs
-
-
-def extract_bars(mask: np.ndarray, zero_px: Optional[float]) -> List[Tuple[float, float]]:
-    cols = mask.sum(0)
-    if cols.max() == 0:
-        return []
-    filled = cols >= 3
-    pts = []
-    for a, b in _runs(filled, min_len=4, max_gap=1):
-        core = slice(a + (b - a) // 4, b - (b - a) // 4 + 1)      # ignore anti-aliased edges
-        rows = [np.flatnonzero(mask[:, c]) for c in range(core.start, core.stop)]
-        rows = [r for r in rows if len(r)]
-        if not rows:
-            continue
-        top = float(np.median([r.min() for r in rows]))
-        bot = float(np.median([r.max() for r in rows]))
-        y = bot if (zero_px is not None and abs(top - zero_px) < abs(bot - zero_px)) else top
-        pts.append(((a + b) / 2.0, y))
-    return pts
-
-
-def extract_markers(mask: np.ndarray, x_fallback: Sequence[float] = ()) -> Tuple[List[Tuple[float, float]], str]:
-    """Return marker centres; if the series has no visible markers, sample the
-    curve at x_fallback positions."""
-    cols = mask.sum(0).astype(float)
-    present = cols > 0
-    if not present.any():
-        return [], "empty"
-    line_w = float(np.median(cols[present]))
-    # expected count of a plain line in each column grows with its slope
-    ys = np.arange(mask.shape[0])[:, None]
-    centre = np.where(present, (mask * ys).sum(0) / np.maximum(cols, 1), np.nan)
-    xi = np.arange(len(cols))
-    centre = np.interp(xi, xi[present], centre[present])
-    slope = np.abs(np.gradient(ndimage.uniform_filter1d(centre, 9)))
-    expected = line_w * np.sqrt(1 + slope ** 2)
-    thick = present & (ndimage.uniform_filter1d(cols, 3) >= np.maximum(expected * 1.5, expected + 1.5))
-    pts = []
-    for a, b in _runs(thick, min_len=3, max_gap=1):
-        if b - a > 25:                        # a long thick stretch is a filled area, not a marker
-            continue
-        sub = mask[:, a:b + 1]
-        lab, n = ndimage.label(sub)
-        if n == 0:
-            continue
-        sizes = ndimage.sum(sub, lab, range(1, n + 1))
-        k = int(np.argmax(sizes)) + 1
-        ys, xs = np.nonzero(lab == k)
-        pts.append((a + xs.mean(), ys.mean()))
-    if len(pts) >= 2:
-        return pts, "markers"
-    # plain line: read the curve centre at the requested x positions
-    out = []
-    for x in x_fallback:
-        xi = int(round(x))
-        win = mask[:, max(0, xi - 1):xi + 2]
-        ys = np.nonzero(win)[0]
-        if len(ys):
-            out.append((float(xi), float(np.median(ys))))
-    return out, "curve"
-
-
-def _frame_line(gray: np.ndarray, orient: str, lo: float, hi: float, span: Tuple[float, float],
-                dark: int = 140, min_frac: float = 0.6) -> Optional[int]:
-    """Row (orient='h') or column (orient='v') between lo and hi that is a dark line covering
-    at least min_frac of `span` (the plot width / height): a frame line of the plot."""
-    h, w = gray.shape
-    lo, hi = int(max(0, math.floor(min(lo, hi)))), int(min((h if orient == "h" else w) - 1, math.ceil(max(lo, hi))))
-    s0, s1 = int(max(0, span[0])), int(min((w if orient == "h" else h), span[1]))
-    if s1 - s0 < 10 or hi <= lo:
-        return None
-    best, best_len = None, 0
-    for i in range(lo, hi + 1):
-        line = gray[i, s0:s1] < dark if orient == "h" else gray[s0:s1, i] < dark
-        n = int(line.sum())
-        if n > best_len:
-            best, best_len = i, n
-    return best if best_len >= min_frac * (s1 - s0) else None
-
-
-def plot_box_from_ticks(x_px: Sequence[float], y_px: Sequence[float], shape,
-                        x_label_y: Optional[float] = None, y_label_x: Optional[float] = None,
-                        gray: Optional[np.ndarray] = None) -> Box:
-    """Plot area from the tick-label positions. The outermost labels are often missing
-    (e.g. '0' at the origin, '100' at the top), so the box is bounded by the axis lines
-    / the label rows when known, and otherwise extended by about one tick step.
-    The box always contains every y tick label row, and stops at the top / right frame
-    line when the plot has one."""
-    h, w = shape[:2]
-    xs, ys = sorted(x_px), sorted(y_px)
-    dx = (xs[-1] - xs[0]) / max(1, len(xs) - 1) if len(xs) > 1 else 20
-    dy = (ys[-1] - ys[0]) / max(1, len(ys) - 1) if len(ys) > 1 else 20
-    left, right = xs[0] - 1.0 * dx, xs[-1] + 1.0 * dx
-    top, bottom = ys[0] - 1.0 * dy, ys[-1] + 1.0 * dy
-    if x_label_y is not None:                     # plot ends above the x tick labels
-        bottom = min(bottom, x_label_y - 7)
-    if y_label_x is not None:                     # and right of the y tick labels
-        left = max(left, y_label_x + 12)
-    if gray is not None:
-        y_ax, x_ax = find_axis_lines(gray)
-        if y_ax is not None and ys[-1] - 2 <= y_ax <= bottom + 2:
-            bottom = y_ax - 1
-        if x_ax is not None and left - 2 <= x_ax <= xs[0] + 2:
-            left = x_ax + 1
-        # top / right frame lines (boxed plots): stop the box there
-        t = _frame_line(gray, "h", ys[0] - 1.1 * dy, ys[0] + 3, (left, right))
-        if t is not None:
-            top = t + 1
-        r = _frame_line(gray, "v", xs[-1] - 3, xs[-1] + 1.1 * dx, (top, bottom))
-        if r is not None:
-            right = r - 1
-    # every y tick label row lies inside the plot (a '0' baseline in the middle of a chart with
-    # negative bars was taken as the x axis, which cut the negative part off)
-    top, bottom = min(top, ys[0] - 2), max(bottom, ys[-1] + 2)
-    left, right = sorted((left, right))
-    top, bottom = sorted((top, bottom))
-    return (max(0, left), max(0, top), min(w, right), min(h, bottom))
-
-
-def find_axis_lines(gray: np.ndarray, dark: int = 120) -> Tuple[Optional[int], Optional[int]]:
-    """(row of the x-axis line, column of the y-axis line), or None when absent."""
-    h, w = gray.shape
-    d = gray < dark
-    def longest(v):
-        r = _runs(v)
-        return max((b - a + 1 for a, b in r), default=0)
-    rows = [longest(d[y, :]) for y in range(h // 2, h)]
-    cols = [longest(d[:, x]) for x in range(0, w // 2)]
-    y_ax = (h // 2 + int(np.argmax(rows))) if max(rows, default=0) > 0.4 * w else None
-    x_ax = int(np.argmax(cols)) if max(cols, default=0) > 0.4 * h else None
-    return y_ax, x_ax
-
-
-def _text_blobs(gray: np.ndarray, dark: int) -> List[Tuple[float, float, float, float]]:
-    """Bounding boxes (x1, y1, x2, y2) of dark connected components, characters merged per word."""
-    d = gray < dark
-    lines = ndimage.binary_opening(d, structure=np.ones((1, 35))) | \
-            ndimage.binary_opening(d, structure=np.ones((35, 1)))
-    d &= ~ndimage.binary_dilation(lines, iterations=1)          # remove axis lines / frame / grid
-    d = ndimage.binary_opening(d, structure=np.ones((2, 1))) | ndimage.binary_opening(d, structure=np.ones((1, 2)))
-    lab, n = ndimage.label(ndimage.binary_dilation(d, structure=np.ones((3, 5))))
-    out = []
-    for sl in ndimage.find_objects(lab):
-        if sl is None:
-            continue
-        y1, y2, x1, x2 = sl[0].start, sl[0].stop, sl[1].start, sl[1].stop
-        if 5 <= (y2 - y1) <= 30 and (x2 - x1) <= 80:              # drop lines, frames, long titles
-            out.append((x1, y1, x2, y2))
-    return out
-
-
-def snap_ticks_to_text(gray: np.ndarray, centers: List[Tuple[float, float]], axis: str,
-                       dark: int = 120) -> List[Tuple[float, float]]:
-    """Correct VLM tick-label centres using the real text blobs.
-    x labels = blobs just below the x-axis line and right of the y-axis line;
-    y labels = blobs whose right edge touches the y-axis line.
-    If the number of blobs equals the number of ticks they are assigned in order,
-    which removes any systematic VLM offset; otherwise the VLM centres are kept."""
-    if len(centers) < 2:
-        return centers
-    y_ax, x_ax = find_axis_lines(gray, dark)
-    blobs_all = _text_blobs(gray, dark)
-    if axis == "x":
-        ref = y_ax if y_ax is not None else float(np.median([c[1] for c in centers])) - 8
-        left = (x_ax - 4) if x_ax is not None else -1
-        cand = [b for b in blobs_all if ref + 3 <= b[1] <= ref + 24 and b[2] >= left]
-        if cand:                                               # keep the first text row only
-            top = min(b[1] for b in cand)
-            cand = [b for b in cand if b[1] <= top + 6]
-        blobs = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in cand]
-        key = 0
-    else:
-        if x_ax is not None:
-            cand = [b for b in blobs_all if x_ax - 14 <= b[2] <= x_ax + 4 and b[0] < x_ax - 4]
-        else:
-            xc = float(np.median([c[0] for c in centers]))
-            cand = [b for b in blobs_all if b[0] - 10 <= xc <= b[2] + 10]
-        blobs = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in cand]
-        key = 1
-    if len(blobs) > len(centers):          # keep the run of blobs that best matches the guess
-        span = np.array(sorted(c[key] for c in centers))
-        bl = sorted(blobs, key=lambda b: b[key])
-        blobs = min((bl[s:s + len(centers)] for s in range(len(bl) - len(centers) + 1)),
-                    key=lambda cand: np.var(np.array([c[key] for c in cand]) - span)
-                    + 0.01 * np.mean(np.abs(np.array([c[key] for c in cand]) - span)))
-    if len(blobs) != len(centers):
-        return centers
-    order = np.argsort([c[key] for c in centers])
-    blobs = sorted(blobs, key=lambda b: b[key])
-    out = list(centers)
-    for i, j in enumerate(order):
-        out[j] = blobs[i]
-    return out
-
-
-def sample_curve(mask: np.ndarray, xs: Sequence[float], win: int = 2) -> List[Tuple[float, float]]:
-    """Centre of the series' pixels at each requested x (skipped where the series is absent)."""
-    out = []
-    for x in xs:
-        xi = int(round(x))
-        sub = mask[:, max(0, xi - win):xi + win + 1]
-        ys = np.nonzero(sub)[0]
-        if len(ys):
-            out.append((float(x), float(np.median(ys))))
-    return out
-
-
-def shared_x_positions(marker_sets: Sequence[Sequence[Tuple[float, float]]], tol: float = 4.0) -> List[float]:
-    """Scientific plots usually measure every series at the same x (doses, time points).
-    Merge the marker x positions found in all series into one sorted list."""
-    xs = sorted(x for pts in marker_sets for x, _ in pts)
-    groups: List[List[float]] = []
-    for x in xs:
-        if groups and x - groups[-1][-1] <= tol:
-            groups[-1].append(x)
-        else:
-            groups.append([x])
-    return [float(np.mean(g)) for g in groups]
-
-
-def extract_line_series(masks: Dict[str, np.ndarray], x_fallback: Sequence[float]) -> Dict[str, Tuple[List[Tuple[float, float]], str]]:
-    """Two passes over all line series of one chart:
-    1) markers per series; 2) x positions shared across series are used to read
-    the series whose markers were too small/occluded to detect."""
-    first = {n: extract_markers(m, ()) for n, m in masks.items()}
-    marker_sets = [pts for pts, kind in first.values() if kind == "markers"]
-    shared = shared_x_positions(marker_sets) if marker_sets else list(x_fallback)
-    out = {}
-    for n, m in masks.items():
-        pts, kind = first[n]
-        if kind == "markers" and len(pts) >= len(shared):
-            out[n] = (pts, "markers")
-        else:
-            sampled = sample_curve(m, shared)
-            out[n] = (sampled, "shared_x" if marker_sets else "ticks") if len(sampled) > len(pts) else (pts, kind)
-    return out
-
-
-def snap_stage1_colors(stage1: dict, image_path: str, box: Optional[Box] = None) -> dict:
-    """Post-processing of stage 1: replace each series colour by the closest colour that is
-    REALLY drawn in the image (same greedy hue matching the digitizer uses).
-    Adds s["color_px"] = "#rrggbb" (None for black/gray series or when nothing matches);
-    s["color"] (what the VLM said) is kept. Small VLMs often answer a CSS colour from memory
-    ('#00008B' for a dark-teal line); snapping fixes most of those."""
-    s1 = copy.deepcopy(stage1)
-    arr = np.asarray(Image.open(image_path).convert("RGB"))
-    h, w = arr.shape[:2]
-    pal = dominant_colors(arr, box or (0, 0, w - 1, h - 1))
-    series = [s for s in s1.get("series", []) or [] if isinstance(s, dict)]
-    cmap = assign_colors([(str(i), s.get("color", "")) for i, s in enumerate(series)], pal)
-    for i, s in enumerate(series):
-        c = cmap.get(str(i))
-        s["color_px"] = None if c is None else "#%02x%02x%02x" % tuple(int(round(v)) for v in c)
-    return s1
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. GRAPH GROUNDER - axis calibration + pixel extraction (config C)
-# ═══════════════════════════════════════════════════════════════════════════
-def _looks_log(ticks) -> bool:
-    """Stage-1 tick labels written as powers of ten (10^-2, 10⁻², 1e-2, 0.01 0.1 1 10)."""
-    vals = [parse_number(str(t)) for t in (ticks or [])]
-    vals = [v for v in vals if v is not None]
-    if len(vals) < 3 or min(vals) <= 0:
-        return False
-    lg = sorted(math.log10(v) for v in vals)
-    steps = [b - a for a, b in zip(lg, lg[1:])]
-    return all(abs(st - steps[0]) < 0.05 for st in steps) and steps[0] >= 0.9
-
-
-# small VLMs drop / swap letters in the usual units: '%D/g', '% ID/g', '%lD/g', '%1D/g', 'ID%/g', '%ID/9'
-_UNIT_FIXES = [
-    (re.compile(r"%\s*[IlL1|]?\s*D\s*/\s*[g9]\b"), "%ID/g"),
-    (re.compile(r"\bI?D\s*%\s*/\s*[g9]\b"), "%ID/g"),
-    (re.compile(r"%\s*I\s*D\b(?!\s*/)"), "%ID"),
-    (re.compile(r"\b(m|c)m\s*\^?\s*3\b|\b(m|c)m³"), lambda m: (m.group(1) or m.group(2)) + "m³"),
-    (re.compile(r"\b[uµμ]\s*g\b"), "µg"),
-    (re.compile(r"\b[uµμ]\s*M\b"), "µM"),
-    (re.compile(r"\b[uµμ]\s*L\b"), "µL"),
-]
-NO_LEGEND_NAMES = {"no_legend", "nolegend", "no legend", "none", "unknown", "n/a", "-", ""}
-
-
-def normalize_units(text):
-    """'%D/g' -> '%ID/g', 'mm^3' -> 'mm³', 'ug' -> 'µg' ... (axis titles and series names)."""
-    if not isinstance(text, str):
-        return text
-    t = text.replace("μ", "µ")
-    for rx, rep in _UNIT_FIXES:
-        t = rx.sub(rep, t)
-    return t
-
-
-_NUM_TICK = re.compile(r"\s*[-+−–]?\s*\d[\d.,]*\s*(%|h|hr|hrs|d|day|days|min|s|wk|week|weeks|"
-                       r"nm|µm|mm|cm|mg/kg|µg|mg|g|ml|mL|µM|nM|mM|°C)?\s*", re.I)
-
-
-def _tick_number(t) -> Optional[float]:
-    """Number of a tick label, or None for a category. '4T1', 'A549', 'PC-3', 'HeLa' are cell
-    lines, not numbers (the old fallback read them as 4, 549, -3 and built a numeric x axis)."""
-    v = parse_number(str(t))
-    if v is not None:
-        return v
-    v = to_float(t)                       # powers of ten '10^-2', '$10^{2}$' ...
-    if v is not None and ("10^" in str(t) or re.search(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]", str(t)) or _NUM_TICK.fullmatch(str(t))):
-        return v
-    return None
-
-
-def normalize_stage1(stage1: dict) -> dict:
-    """Fix common small-VLM stage-1 habits before extraction:
-    * unit typos in the axis titles ('%D/g' -> '%ID/g', see normalize_units);
-    * a chart without legend (series 'NO_LEGEND' / 'unknown' / empty name) -> one series
-      named after the y-axis title (the name is not evaluated for single-series charts);
-    * a single-series bar chart listed as one series PER BAR (series names = x categories,
-      all with the same colour) -> merged into one series;
-    * the same series listed twice -> kept once."""
-    if not isinstance(stage1, dict):
-        return stage1
-    s1 = copy.deepcopy(stage1)
-    for k in ("x_axis", "y_axis"):
-        if k in s1:
-            s1[k] = normalize_units(s1[k])
-    series = [s for s in s1.get("series", []) or [] if isinstance(s, dict)]
-    for s in series:
-        s["name"] = normalize_units(str(s.get("name", "")).strip().strip("\"'`"))
-        if s["name"].lower() in NO_LEGEND_NAMES:
-            s["name"] = s1.get("y_axis") or "value"
-    seen, uniq = set(), []
-    for s in series:
-        key = str(s.get("name", "")).strip().lower()
-        if key not in seen:
-            seen.add(key)
-            uniq.append(s)
-    series = uniq
-    cats = [str(t).strip().lower() for t in s1.get("x_ticks") or []]
-    def is_bar(s):
-        return str(s.get("marker", "")).lower() in ("none", "", "unknown", "-") and \
-            str(s.get("line", "")).lower() in ("none", "", "unknown", "-")
-    if len(series) >= 2 and cats and all(is_bar(s) for s in series):
-        hits = sum(bool(difflib.get_close_matches(str(s.get("name", "")).strip().lower(), cats, n=1, cutoff=0.8))
-                   for s in series)
-        colours = [str(s.get("color", "")).strip().lower() for s in series]
-        common = max(set(colours), key=colours.count)
-        # a grouped bar chart whose LEGEND names also appear on the x axis (e.g. 'Control')
-        # has a different colour per series -> only merge when (almost) all colours are the same
-        same_colour = colours.count(common) >= max(2, 0.8 * len(series))
-        if hits >= 0.8 * len(series) and (same_colour or len(series) > len(cats)):
-            common = max(set(colours), key=colours.count)
-            series = [{"name": s1.get("y_axis") or "value", "color": common, "marker": "none", "line": "none"}]
-    s1["series"] = series
-    return s1
-
-
-def legend_box_from_tokens(tokens, names, img_w: int) -> Optional[Tuple[float, float, float, float]]:
-    """Legend box from OCR text: the tokens that spell the series names (>= 2 of them, close
-    together), extended to the LEFT by ~3.5 text heights for the symbol / line sample.
-    Exact pixels and no VLM call; returns None when the legend text is not found."""
-    names = [str(n) for n in names if str(n).strip()]
-    if len(names) < 2 or not tokens:
-        return None
-    norm = lambda t: re.sub(r"\s+", "", str(t)).lower()
-    targets = [norm(n) for n in names]
-    hits, used = [], set()
-    for t in tokens:
-        m = difflib.get_close_matches(norm(t.text), targets, n=1, cutoff=0.75)
-        if m and m[0] not in used:
-            used.add(m[0])
-            hits.append(t)
-    if len(hits) < 2:
-        return None
-    h = float(np.median([t.y2 - t.y1 for t in hits]))
-    x1, y1 = min(t.x1 for t in hits), min(t.y1 for t in hits)
-    x2, y2 = max(t.x2 for t in hits), max(t.y2 for t in hits)
-    if (x2 - x1) > 0.8 * img_w or (y2 - y1) > (len(hits) + 1) * 2.5 * h:   # scattered: not one legend
-        return None
-    return (max(0.0, x1 - 3.5 * h), y1 - 0.4 * h, x2 + 0.4 * h, y2 + 0.4 * h)
-
-
-def legend_entries(tokens, names) -> Dict[str, List[Any]]:
-    """{series name: OCR tokens that spell it, best match first}. A name can appear twice
-    (legend AND x-axis category, e.g. 'Control'); the swatch test picks the legend one."""
-    norm = lambda t: re.sub(r"\s+", "", str(t)).lower()
-    out: Dict[str, List[Any]] = {}
-    for n in [str(n) for n in names if str(n).strip()]:
-        # a number is a tick label, not legend text (Fig 36: series '1','2','3' = week numbers under
-        # the bars; their "swatch" was read next to the x labels and made week 3 gray)
-        c = [(difflib.SequenceMatcher(None, norm(t.text), norm(n)).ratio(), i, t) for i, t in enumerate(tokens or [])
-             if getattr(t, "num", None) is None]
-        c = [x for x in c if x[0] >= 0.75]
-        if c:
-            out[n] = [t for _, _, t in sorted(c, key=lambda x: (-x[0], x[1]))]
-    return out
-
-
-def _text_start_x(t, name: str) -> float:
-    """OCR often glues the legend symbol to the name ('mm Conj-HSLN', 'a -@GEM-LNP'): find where
-    the name starts inside the token text and convert that character offset to a pixel x."""
-    txt = str(t.text)
-    if not name or len(txt) <= len(name):
-        return float(t.x1)
-    best_k = max(range(len(txt) - len(name) // 2),
-                 key=lambda k: difflib.SequenceMatcher(None, txt[k:].lower(), name.lower()).ratio() - 0.001 * k)
-    return float(t.x1 + (t.x2 - t.x1) * best_k / len(txt))
-
-
-def _swatch(arr: np.ndarray, t, name: str = "") -> Optional[Dict[str, Any]]:
-    """Colour of the symbol just LEFT of one legend text token."""
-    h_img = arr.shape[0]
-    h = max(4.0, t.y2 - t.y1)
-    tx = _text_start_x(t, name)
-    x1, x2 = int(max(0, tx - 3.5 * h)), int(max(0, tx - 1))
-    y1, y2 = int(max(0, t.y1 - 0.2 * h)), int(min(h_img, t.y2 + 0.2 * h))
-    if x2 - x1 < 3 or y2 - y1 < 3:
-        return None
-    px = arr[y1:y2, x1:x2].reshape(-1, 3).astype(int)
-    chroma = px[(px.max(1) - px.min(1)) >= 20]
-    if len(chroma) >= 4:
-        sat = chroma.max(1) - chroma.min(1)
-        core = chroma[sat >= np.median(sat)]          # core of the symbol, not its anti-aliased rim
-        c = np.median(core, axis=0)
-        return {"hex": "#%02x%02x%02x" % tuple(int(v) for v in c), "kind": "chromatic", "n_px": int(len(chroma)),
-                "token": t}
-    dark = px[px.max(1) < 170]
-    if len(dark) >= 4:
-        c = np.median(dark, axis=0)
-        return {"hex": "#%02x%02x%02x" % tuple(int(v) for v in c), "kind": "achromatic", "n_px": int(len(dark)),
-                "token": t}
-    return None
-
-
-def legend_swatch_colors(arr: np.ndarray, entries: Dict[str, List[Any]]) -> Dict[str, Dict[str, Any]]:
-    """Colour of each legend symbol, read from the pixels just LEFT of its legend text
-    (marker / line sample / bar swatch). For every name the candidate texts are tried in
-    order and the first one with a COLOURED symbol wins (an x-axis label has none).
-    Returns {name: {"hex", "kind", "n_px"}}; kind "achromatic" = black/gray symbol.
-    Small VLMs name colours from memory ('#00008B' for dark teal); the pixels do not lie."""
-    out = {}
-    for name, toks in entries.items():
-        if not isinstance(toks, (list, tuple)):
-            toks = [toks]
-        found = [sw for sw in (_swatch(arr, t, name) for t in toks) if sw]
-        chrom = [sw for sw in found if sw["kind"] == "chromatic"]
-        if chrom:
-            out[name] = chrom[0]
-        elif found:
-            out[name] = found[0]
-    return out
-
-
-def build_region_prompt(what: str) -> dict:
-    return _prompt(
-        expertise="You are an expert at precisely localizing regions in scientific figures.",
-        objective=f"Locate the {what} in the image. If there is no {what}, return [].",
-        schema='[{"bbox_2d": [x1, y1, x2, y2], "label": "' + what + '"}]',
-        rules=[
-            "Return at most one box.",
-            "The box must enclose the whole region, including its frame and text.",
-            "Return [] if the region does not exist. Do not guess.",
-        ],
-    )
-
-
-class GraphGrounder:
-    def __init__(self, vlm_model, prompt_template_path: Optional[str],
-                 coord_mode: str = "norm1000", refine: bool = True,
-                 use_color: bool = True, snap_ticks: bool = True, find_regions: bool = True,
-                 tick_source: str = "ocr", ocr_vlm_classify: bool = False, ocr_backend: str = "auto",
-                 legend_colors: bool = True, fix_legend: bool = True, skip_tables: bool = True):
-        """tick_source: "ocr" (OCR boxes, VLM only as fallback) or "vlm".
-        ocr_backend: "auto" (tesseract if installed, else rapidocr), "tesseract" or "rapidocr".
-        ocr_vlm_classify: also ask the VLM to label the OCR boxes (x_tick / y_tick /
-        title / legend / inset ...) - useful for crowded figures with insets.
-        fix_legend: correct stage-1 series names from the OCR legend and add missing series.
-        skip_tables: stop (no extraction) when the OCR text is laid out as a table."""
-        self.vlm = vlm_model
-        self.template = prompt_template_path
-        self.coord_mode = coord_mode
-        self.refine = refine
-        self.use_color = use_color
-        self.snap_ticks = snap_ticks
-        self.find_regions = find_regions
-        self.tick_source = tick_source
-        self.ocr_vlm_classify = ocr_vlm_classify
-        self.ocr_backend = ocr_backend          # "auto" | "tesseract" | "rapidocr"
-        self.legend_colors = legend_colors      # read series colours from the legend symbols (pixels)
-        self.fix_legend = fix_legend
-        self.skip_tables = skip_tables
-        self.last_stage1: Dict[str, Any] = {}
-        self.last_masks: Dict[str, np.ndarray] = {}   # stage 1 actually used (normalised, colours from legend)
-        self._ocr_axes: Optional[Dict[str, Any]] = None
-        self.last_diagnostics: Dict[str, Any] = {}
-        self.last_calibration: Dict[str, Any] = {}
-        self.last_points_px: Dict[str, List[Dict[str, Any]]] = {}   # {series: [{x_px, y_px, x, y}]}
-
-    # ───────────────────────── VLM ─────────────────────────
-    def _ask(self, prompt_dict: dict, image_path: str, scale: float) -> str:
-        fm = PromptFormatter(**prompt_dict)
-        fm.model_post_init(self.template)
-        prompt = fm.format_prompt("<image>")
-        out = self.vlm.run_image_single_prompt_rescale(prompt, image_path, scale=scale)
-        print(f"\n  [GraphGrounder] RAW:\n{out}")
-        return out
-
-    # ───────────────────────── axes ─────────────────────────
-    @staticmethod
-    def _axis_from_pairs(pairs, axis, log_hint: Optional[bool] = None):
-        pos = [(p[0] if axis == "x" else p[1], p[2]) for p in pairs]
-        nums = [(p, _tick_number(t)) for p, t in pos]
-        if len(nums) >= 2 and all(v is not None for _, v in nums):
-            return NumericAxis([p for p, _ in nums], [v for _, v in nums], log_hint=log_hint), pairs
-        if pos:
-            return CategoricalAxis([p for p, _ in pos], [t for _, t in pos]), pairs
-        return None, []
-
-    def _build_axis(self, image_path, axis, ticks, space, scale, gray):
-        ocr_pairs = (self._ocr_axes or {}).get(axis) or []
-        log_hint = _looks_log(ticks) or \
-            ((self._ocr_axes or {}).get("info", {}).get(axis, {}).get("type") == "log")
-        exp = [v for v in (_tick_number(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")) if v is not None]
-        if len(ocr_pairs) == 2 and len(exp) >= 3:
-            # two points always fit a line, so a misread pair ('90' + '7' read from '0') would be
-            # accepted silently: with only 2 OCR ticks both values must be in the stage-1 list
-            vals = [_tick_number(p[2]) for p in ocr_pairs]
-            if not all(v is not None and any(abs(v - e) <= 1e-6 * max(1.0, abs(e)) for e in exp) for v in vals):
-                print(f"  [GraphGrounder] OCR {axis} ticks {[p[2] for p in ocr_pairs]} not in stage 1 -> not used")
-                ocr_pairs = []
-        if len(ocr_pairs) >= 2:                               # exact OCR boxes: no VLM call
-            self._tick_source_used[axis] = "ocr"
-            if axis == "x" and not exp:
-                ocr_pairs = complete_categories(ocr_pairs, ticks)
-            return self._axis_from_pairs(ocr_pairs, axis, log_hint)
-        self._tick_source_used[axis] = "vlm"
-        ticks = [str(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")]
-        if not ticks:
-            return None, []
-        items = parse_json_list(self._ask(build_tick_locator_prompt(axis, ticks), image_path, scale))
-
-        by_label = {}
-        for it in items:
-            if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
-                by_label.setdefault(_norm_label(it.get("label", "")), it["bbox_2d"])
-
-        pairs: List[Tuple[float, float, str]] = []           # (cx, cy, tick text)
-        for t in ticks:
-            b = by_label.get(_norm_label(t))
-            if b:
-                x1, y1, x2, y2 = space.bbox(b)
-                pairs.append(((x1 + x2) / 2, (y1 + y2) / 2, t))
-        if len(pairs) < 2 and len(items) == len(ticks):      # labels ignored, boxes in order
-            pairs = []
-            for t, it in zip(ticks, items):
-                if "bbox_2d" in it and len(it["bbox_2d"]) == 4:
-                    x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
-                    pairs.append(((x1 + x2) / 2, (y1 + y2) / 2, t))
-
-        if self.snap_ticks:
-            h, w = gray.shape
-            if len(pairs) < 2 and len(ticks) >= 2:           # VLM failed: try the text blobs alone
-                n = len(ticks)
-                dummy = ([(w * (i + 1) / (n + 1), h - 1) for i in range(n)] if axis == "x"
-                         else [(1, h * (i + 1) / (n + 1)) for i in range(n)])
-                snapped = snap_ticks_to_text(gray, dummy, axis)
-                if snapped != dummy:
-                    order = ticks if axis == "x" else ticks       # stage-1 order: left->right / as listed
-                    key = 0 if axis == "x" else 1
-                    snapped = sorted(snapped, key=lambda c: c[key])
-                    if axis == "y" and to_float(order[0]) is not None and to_float(order[-1]) is not None \
-                            and to_float(order[0]) < to_float(order[-1]):
-                        order = list(reversed(order))             # top of image = largest value
-                    pairs = [(c[0], c[1], t) for c, t in zip(snapped, order)]
-            elif len(pairs) >= 2:
-                snapped = snap_ticks_to_text(gray, [(p[0], p[1]) for p in pairs], axis)
-                pairs = [(c[0], c[1], p[2]) for c, p in zip(snapped, pairs)]
-
-        return self._axis_from_pairs(pairs, axis, log_hint)
-
-    def _region(self, what, image_path, space, scale):
-        if not self.find_regions:
-            return None
-        items = parse_json_list(self._ask(build_region_prompt(what), image_path, scale))
-        for it in items:
-            if len(it.get("bbox_2d", [])) == 4:
-                return space.bbox(it["bbox_2d"])
-        return None
-
-    def _categories_from_bars(self, arr, gray, stage1, y_anc):
-        """Bar charts whose category labels OCR cannot read (rotated, long names): find the
-        bars by colour, group them per category, and give the groups the stage-1 category
-        names in order (left to right). Used only if the group count matches exactly."""
-        cats = [str(t) for t in (stage1.get("x_ticks") or []) if t not in (None, "", "UNKNOWN")]
-        bars = [s for s in stage1.get("series", []) if self._is_bar(s)]
-        if len(cats) < 2 or not bars or sum(parse_number(c) is not None for c in cats) > len(cats) / 2:
-            return None, []
-        h, w = gray.shape
-        y_ax, x_ax = find_axis_lines(gray)
-        ys = sorted(a[1] for a in y_anc)
-        left = (x_ax + 2) if x_ax is not None else float(np.median([a[0] for a in y_anc])) + 15
-        bottom = y_ax if y_ax is not None else min(h - 1, ys[-1] + 2)
-        box = (left, max(0, ys[0] - 0.5 * (ys[-1] - ys[0]) / max(1, len(ys) - 1)), w - 2, bottom)
-        palette = dominant_colors(arr, box, [])
-        cmap = assign_colors([(s.get("name", ""), s.get("color", "")) for s in bars], palette)
-        region = _region_mask(arr.shape, box, [])
-        zero_px = None
-        centers = []
-        for s in bars:
-            rgb = cmap.get(s.get("name", ""))
-            if rgb is None:
-                continue
-            m = color_mask(arr, rgb, region, palette=[c for c, _ in palette])
-            centers += [c[0] for c in extract_bars(m, zero_px)]
-        if len(centers) < len(cats):
-            return None, []
-        centers = sorted(centers)
-        gaps = np.diff(centers)
-        if len(cats) > 1:                                  # split at the largest gaps -> categories
-            cut = sorted(np.argsort(gaps)[-(len(cats) - 1):])
-            groups, start = [], 0
-            for c in cut:
-                groups.append(centers[start:c + 1])
-                start = c + 1
-            groups.append(centers[start:])
-        else:
-            groups = [centers]
-        if len(groups) != len(cats) or any(len(g) == 0 for g in groups):
-            return None, []
-        sizes = [len(g) for g in groups]
-        if max(sizes) - min(sizes) > 1:                     # uneven groups -> unreliable
-            return None, []
-        pos = [float(np.mean(g)) for g in groups]
-        pairs = [(p, float(bottom) + 10, c) for p, c in zip(pos, cats)]
-        return CategoricalAxis(pos, cats), pairs
-
-    @staticmethod
-    def _is_bar(s: dict) -> bool:
-        m = str(s.get("marker", "")).strip().lower()
-        l = str(s.get("line", "")).strip().lower()
-        return m in ("none", "", "unknown", "-") and l in ("none", "", "unknown", "-")
-
-    @staticmethod
-    def _sanitize(px_pts, box, exclude, n_x_ticks):
-        """Drop VLM points outside the plot / inside legend or inset, duplicates, runaway lists."""
-        x1, y1, x2, y2 = box
-        keep = []
-        for x, y in px_pts:
-            if not (x1 - 5 <= x <= x2 + 5 and y1 - 5 <= y <= y2 + 5):
-                continue
-            if any(a <= x <= c and b <= y <= d for a, b, c, d in exclude):
-                continue
-            if any(abs(x - kx) < 3 and abs(y - ky) < 3 for kx, ky in keep):
-                continue
-            keep.append((x, y))
-        limit = max(30, 4 * n_x_ticks)
-        if len(keep) > limit:
-            return [], "rejected: too many points (generation loop)"
-        if len(keep) >= 5:                                     # evenly stepped lattice = repetition loop
-            k = sorted(keep)
-            dx, dy = np.diff([p[0] for p in k]), np.diff([p[1] for p in k])
-            if np.std(dx) < 1.5 and np.std(dy) < 1.5:
-                return [], "rejected: evenly spaced points (generation loop)"
-        return keep, None
-
-    # ───────────────────────── extraction ─────────────────────────
-    def extract(self, image_path: str, stage1: dict, scale: float = 1.0,
-                debug_dir: Optional[str] = None) -> Dict[str, Any]:
-        stage1 = normalize_stage1(stage1)
-        img = Image.open(image_path).convert("RGB")
-        arr = np.array(img)
-        gray = np.array(img.convert("L")).astype(int)
-        space = CoordSpace(img.width, img.height, self.coord_mode, scale)
-
-        self._ocr_axes, self._tick_source_used, self._ocr_tokens = None, {}, []
-        self.last_points_px, self.last_calibration, self.last_masks = {}, {}, {}
-        self.last_palette, self.last_series_rgb = [], {}
-        self.last_diagnostics = {}
-        self.last_stage1 = stage1
-        if self.tick_source == "ocr":
-            try:
-                toks = ocr_tokens(image_path, backend=self.ocr_backend)
-                self._ocr_tokens = toks
-                if self.skip_tables and looks_like_table(toks):
-                    print("  [GraphGrounder] the image looks like a TABLE -> not extracted")
-                    self.last_diagnostics = {"error": "looks like a table"}
-                    return {"x_axis": stage1.get("x_axis"), "y_axis": stage1.get("y_axis")}
-                labels = None
-                if self.ocr_vlm_classify and toks:
-                    work_dir = debug_dir or os.path.dirname(image_path) or "."
-                    os.makedirs(work_dir, exist_ok=True)          # debug_dir may not exist yet
-                    work = os.path.join(work_dir, os.path.splitext(os.path.basename(image_path))[0] + "_ocr_marks.png")
-                    try:                                          # a failed labelling must not lose the OCR
-                        labels = classify_tokens_with_vlm(self.vlm, self.template, image_path, toks, work)
-                    except Exception as e:
-                        print(f"  [GraphGrounder] token labelling failed ({type(e).__name__}: {e}); geometry only")
-                        labels = None
-                self._ocr_axes = find_ticks(image_path, stage1, tokens=toks, vlm_labels=labels,
-                                            backend=self.ocr_backend)
-                print(f"  [GraphGrounder] OCR ticks: {self._ocr_axes['info']}")
-            except Exception as e:                            # tesseract missing, etc. -> VLM path
-                print(f"  [GraphGrounder] OCR failed ({e}); using VLM tick boxes")
-
-        legend_fix: Dict[str, Any] = {}
-        if self.fix_legend and self._ocr_tokens and len(stage1.get("series", [])) >= 2:
-            try:
-                stage1, legend_fix = fix_series_from_legend(stage1, self._ocr_tokens, arr)
-                if legend_fix.get("renamed") or legend_fix.get("added"):
-                    print(f"  [GraphGrounder] legend fix: {legend_fix}")
-            except Exception as e:                            # a failed fix must not stop the extraction
-                print(f"  [GraphGrounder] legend fix failed ({type(e).__name__}: {e})")
-
-        legend_cols = {}
-        if self.use_color and self.legend_colors and self._ocr_tokens and len(stage1.get("series", [])) >= 2:
-            legend_cols = legend_swatch_colors(arr, legend_entries(self._ocr_tokens,
-                                                                   [s.get("name", "") for s in stage1["series"]]))
-            for s in stage1["series"]:
-                c = legend_cols.get(s.get("name", ""))
-                if c and c["kind"] == "chromatic":        # decided below, once the plot colours are known
-                    s["color_legend"] = c["hex"]
-        self.last_stage1 = stage1
-
-        x_map, x_anc = self._build_axis(image_path, "x", stage1.get("x_ticks"), space, scale, gray)
-        y_map, y_anc = self._build_axis(image_path, "y", stage1.get("y_ticks"), space, scale, gray)
-
-        result: Dict[str, Any] = {"x_axis": stage1.get("x_axis"), "y_axis": stage1.get("y_axis")}
-        self.last_diagnostics = {"x_axis": x_map.info() if x_map else None,
-                                 "y_axis": y_map.info() if y_map else None,
-                                 "tick_source": dict(self._tick_source_used),
-                                 "legend_colors": {n: c["hex"] for n, c in legend_cols.items()}}
-        if legend_fix.get("renamed") or legend_fix.get("added"):
-            self.last_diagnostics["legend_fix"] = legend_fix
-        overlay: Dict[str, Any] = {"x": x_anc, "y": y_anc, "box": None, "exclude": [], "series": {}}
-
-        if x_map is None and y_map is not None and self.use_color:
-            x_map, x_anc = self._categories_from_bars(arr, gray, stage1, y_anc)
-            if x_map is not None:
-                self._tick_source_used["x"] = "bar_positions"
-                self.last_diagnostics["x_axis"] = x_map.info()
-                self.last_diagnostics["tick_source"] = dict(self._tick_source_used)
-                overlay["x"] = x_anc
-
-        if x_map is None or y_map is None:
-            print("  [GraphGrounder] axis calibration failed -> no series extracted")
-            self.last_diagnostics["error"] = "axis calibration failed"
-            if debug_dir:
-                self._save_overlay(img, overlay, debug_dir, image_path)
-            return result
-
-        box = plot_box_from_ticks([a[0] for a in x_anc], [a[1] for a in y_anc], arr.shape,
-                                  x_label_y=float(np.median([a[1] for a in x_anc])),
-                                  y_label_x=float(np.median([a[0] for a in y_anc])), gray=gray)
-        exclude, exclude_info = [], []
-        if self.use_color:
-            for what in ("legend", "inset plot"):
-                r = None
-                if what == "legend":          # exact box from the OCR'd legend text, no VLM call
-                    sw_toks = [c["token"] for c in legend_cols.values() if c["kind"] == "chromatic"]
-                    names = [s.get("name", "") for s in stage1.get("series", [])]
-                    # the texts that have a coloured symbol next to them ARE the legend (not x labels)
-                    r = (legend_box_from_tokens(sw_toks, names, img.width) if len(sw_toks) >= 2 else None) \
-                        or legend_box_from_tokens(self._ocr_tokens, names, img.width)
-                    self.last_diagnostics["legend_source"] = "ocr" if r else "vlm"
-                else:                         # inset = its own tick labels inside the plot box (OCR)
-                    r = inset_box_from_tokens(self._ocr_tokens, box, x_anc, y_anc)
-                    self.last_diagnostics["inset_source"] = "ocr" if r else "vlm"
-                src = "ocr"
-                if r is None:
-                    r, src = self._region(what, image_path, space, scale), "vlm"
-                if r and not (r[2] < box[0] or r[0] > box[2] or r[3] < box[1] or r[1] > box[3]):
-                    exclude.append(r)
-                    exclude_info.append({"what": what.split()[0], "source": src,
-                                         "box": [round(float(v), 1) for v in r]})
-        self.last_diagnostics["excluded_regions"] = exclude_info
-        overlay["box"], overlay["exclude"] = box, exclude
-        region = _region_mask(arr.shape, box, exclude)
-        zero_px = y_map.pixel(0.0) if isinstance(y_map, NumericAxis) and not y_map.log else None
-
-        series = stage1.get("series", [])
-        masks: Dict[str, np.ndarray] = {}
-        if self.use_color and series:
-            palette = dominant_colors(arr, box, exclude)
-            choose_series_colors(series, palette)
-            self.last_diagnostics["series_colors"] = {s.get("name"): {k: s.get(k) for k in
-                                                      ("color", "color_vlm", "color_legend", "color_source")}
-                                                      for s in series}
-            cmap = assign_colors([(s.get("name", "UNKNOWN"), s.get("color", "")) for s in series], palette)
-            pal = [c for c, _ in palette]
-            # for fade_other_series: every colour drawn in the plot + which one is whose
-            self.last_palette = [tuple(float(v) for v in c) for c in pal]
-            self.last_series_rgb = {n: tuple(float(v) for v in c) for n, c in cmap.items() if c is not None}
-            for s in series:
-                rgb = cmap.get(s.get("name", "UNKNOWN"))
-                if rgb is not None:
-                    masks[s.get("name", "UNKNOWN")] = color_mask(arr, rgb, region, palette=pal)
-        line_masks = {s.get("name", "UNKNOWN"): masks[s.get("name", "UNKNOWN")]
-                      for s in series if s.get("name", "UNKNOWN") in masks and not self._is_bar(s)}
-        lines = extract_line_series(line_masks, [a[0] for a in x_anc]) if line_masks else {}
-        # kept for grid_extract (direct reading with a value grid)
-        shared_px = shared_x_positions([pts for pts, kind in lines.values() if kind != "ticks"])
-        self.last_masks = masks                 # {series: bool mask of its pixels}
-        self.last_calibration = {
-            "x_map": x_map if isinstance(x_map, NumericAxis) else None, "y_map": y_map,
-            "box": box, "exclude": exclude, "exclude_info": exclude_info,
-            "data_x": [round(x_map.value(p), 6) for p in shared_px] if isinstance(x_map, NumericAxis) else [],
-            # categorical x (bars): [(pixel, label), ...] so other methods can draw at the category
-            "x_cat": [(float(p), str(l)) for p, l in zip(x_map.pix, x_map.labels)]
-                     if isinstance(x_map, CategoricalAxis) else [],
-            # tick labels found by OCR / VLM, in ORIGINAL-image pixels: [(cx, cy, "text"), ...]
-            "x_ticks_px": [(round(float(a), 2), round(float(b), 2), t) for a, b, t in x_anc],
-            "y_ticks_px": [(round(float(a), 2), round(float(b), 2), t) for a, b, t in y_anc],
-        }
-        self.last_points_px = {}
-
-        for s in series:
-            name = s.get("name", "UNKNOWN")
-            color = s.get("color", "UNKNOWN")
-            bar = self._is_bar(s)
-            px_pts, method, note = [], None, None
-
-            if name in masks:                                   # 1) pixels
-                if bar:
-                    px_pts, method = extract_bars(masks[name], zero_px), "color_bars"
-                else:
-                    px_pts, method = lines[name]
-                    method = f"color_{method}"
-
-            cname = str(color).strip().lower()
-            chromatic = name_to_rgb(cname) is not None and not is_achromatic(cname)
-            if not px_pts and self.use_color and chromatic and name not in masks:
-                # a coloured series whose colour is absent from the main plot is
-                # only in the legend/inset -> do not let the VLM invent points
-                px_pts, method, note = [], "skipped", "colour not found in main plot (inset/legend only?)"
-            elif not px_pts:                                    # 2) VLM fallback
-                if bar:
-                    items = parse_json_list(self._ask(build_bars_prompt(name, color), image_path, scale))
-                else:
-                    items = parse_json_list(self._ask(
-                        build_points_prompt(name, color, s.get("marker", "UNKNOWN"), s.get("line", "UNKNOWN")),
-                        image_path, scale))
-                for it in items:
-                    if bar and len(it.get("bbox_2d", [])) == 4:
-                        x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
-                        cy = y2 if (zero_px is not None and (y1 + y2) / 2 > zero_px) else y1
-                        px_pts.append(((x1 + x2) / 2, cy))
-                    elif "point_2d" in it and len(it["point_2d"]) == 2:
-                        px_pts.append((space.px(it["point_2d"][0], "x"), space.px(it["point_2d"][1], "y")))
-                    elif len(it.get("bbox_2d", [])) == 4:
-                        x1, y1, x2, y2 = space.bbox(it["bbox_2d"])
-                        px_pts.append(((x1 + x2) / 2, (y1 + y2) / 2))
-                if self.refine and not bar:
-                    px_pts = [snap_to_marker(arr, x, y) for x, y in px_pts]
-                px_pts, note = self._sanitize(px_pts, box, exclude, len(x_anc))
-                method = "vlm"
-
-            px_pts = sorted(px_pts, key=lambda p: p[0])
-            out = []
-            for x, y in px_pts:
-                xv, yv = x_map.value(x), y_map.value(y)
-                out.append([round(xv, 4) if isinstance(xv, float) else xv, round(yv, 4)])
-            result[name] = out
-            overlay["series"][name] = (px_pts, out, method)
-            # data points in ORIGINAL-image pixels, same order as result[name]
-            self.last_points_px[name] = [{"x_px": round(float(x), 2), "y_px": round(float(y), 2),
-                                          "x": v[0], "y": v[1], "method": method}
-                                         for (x, y), v in zip(px_pts, out)]
-            self.last_diagnostics[name] = {"kind": "bars" if bar else "points", "method": method,
-                                           "n": len(out), **({"note": note} if note else {})}
-
-        if debug_dir:
-            self._save_overlay(img, overlay, debug_dir, image_path)
-        return result
-
-    # ───────────────────────── debug image ─────────────────────────
-    @staticmethod
-    def _save_overlay(img, ov, debug_dir, image_path, zoom: int = 2):
-        os.makedirs(debug_dir, exist_ok=True)
-        im = img.resize((img.width * zoom, img.height * zoom), Image.LANCZOS)
-        d = ImageDraw.Draw(im)
-        Z = lambda *v: [c * zoom for c in v]
-        def _box(b):                                       # PIL needs x0<=x1, y0<=y1
-            x1, y1, x2, y2 = b
-            return Z(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-        if ov.get("box"):
-            d.rectangle(_box(ov["box"]), outline=(150, 150, 150))
-        for ex in ov.get("exclude", []):
-            d.rectangle(_box(ex), outline=(255, 140, 0), width=2)
-        for x, y, t in ov.get("x", []) + ov.get("y", []):          # tick labels where they really are
-            d.ellipse(Z(x - 4, y - 4, x + 4, y + 4), outline=(0, 0, 255), width=2)
-            d.text((x * zoom + 8, y * zoom - 14), str(t), fill=(0, 0, 255))
-        for name, (pts, vals, method) in ov.get("series", {}).items():
-            col = (0, 160, 0) if str(method).startswith("color") else (220, 0, 0)
-            for (x, y), (xv, yv) in zip(pts, vals):
-                d.ellipse(Z(x - 4, y - 4, x + 4, y + 4), outline=col, width=2)
-                d.text((x * zoom + 7, y * zoom + 4), f"{yv:g}", fill=col)
-        base = os.path.splitext(os.path.basename(image_path))[0]
-        im.save(os.path.join(debug_dir, f"{base}_grounded.png"))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. GRID OVERLAY - value grid + one VLM reading per series (config D)
-# ═══════════════════════════════════════════════════════════════════════════
 FONT_PATHS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
               "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "arial.ttf"]
+
+Box = Tuple[float, float, float, float]
 
 
 def _font(size: int):
@@ -2416,7 +487,400 @@ def _font(size: int):
     return ImageFont.load_default(size=size)
 
 
-# ───────────────────────── axis helpers ─────────────────────────
+# ═════════════════════════ annotation filter ═════════════════════════
+# Non-data ink. Everything here works on the ORIGINAL figure, before the value
+# grid is drawn: run it on a gridded image and the drawn gridlines look like
+# brackets.
+# token texts that are never data
+SIG_TEXT_RX = re.compile(
+    r"^(?:"
+    r"[*∗٭⁎#†‡§]{1,6}"      # * ** *** # ## dagger
+    r"|n\.?\s*s\.?"                                       # n.s.  ns
+    r"|p\s*[<>=≤≥]\s*0?[.,]\d+"                 # p<0.05
+    r")$", re.I)
+
+PLUS_TEXT_RX = re.compile(r"^[+†]{1,3}$")
+PLUS_MARKERS = ("plus", "cross", "+", "x", "star", "asterisk")
+
+
+# ───────────────────────── low level ─────────────────────────
+def _dark(arr: np.ndarray, dark: int = 135, max_chroma: int = 45) -> np.ndarray:
+    """Dark and (nearly) achromatic pixels: ink that is not a coloured series."""
+    a = arr.astype(int)
+    return (a.mean(2) < dark) & ((a.max(2) - a.min(2)) <= max_chroma)
+
+
+def _box_mask(shape, box: Box, shrink: float = 0.0) -> np.ndarray:
+    h, w = shape[:2]
+    x1, y1, x2, y2 = box
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
+    m = np.zeros((h, w), bool)
+    m[max(0, int(y1 + shrink)):min(h, int(y2 - shrink) + 1),
+      max(0, int(x1 + shrink)):min(w, int(x2 - shrink) + 1)] = True
+    return m
+
+
+def _run_thickness(d: np.ndarray, axis: int, win: int) -> np.ndarray:
+    """Number of dark pixels in a window of length `win` along `axis`, per pixel."""
+    k = ndimage.uniform_filter1d(d.astype(np.float32), size=win, axis=axis, mode="constant")
+    return k * win
+
+
+# ───────────────────────── brackets ─────────────────────────
+def _runs_1d(flags: np.ndarray, max_gap: int = 1) -> List[Tuple[int, int]]:
+    idx = np.flatnonzero(flags)
+    if len(idx) == 0:
+        return []
+    out, s, p = [], int(idx[0]), int(idx[0])
+    for i in idx[1:]:
+        if i - p > max_gap + 1:
+            out.append((s, p))
+            s = int(i)
+        p = int(i)
+    out.append((s, p))
+    return out
+
+
+def _free_sides(d: np.ndarray, leg: Sequence[int], x: int, gap: int = 3,
+                frac: float = 0.75) -> bool:
+    """True when the column `x` is an isolated vertical hairline along `leg`.
+
+    A bracket leg has white on both sides. A steep data curve does not: it keeps
+    going sideways, so `x - gap` or `x + gap` is ink for most of the run. Without
+    this test a near-vertical black curve is read as a bracket leg and erased.
+    """
+    w = d.shape[1]
+    free = 0
+    for yy in leg:
+        l_ = x - gap
+        r_ = x + gap
+        if (l_ < 0 or not d[yy, l_]) and (r_ >= w or not d[yy, r_]):
+            free += 1
+    return free >= frac * len(leg)
+
+
+def bracket_mask(d: np.ndarray, inside: np.ndarray, min_len_px: int, max_len_px: int,
+                 max_thick: int = 4, edge: int = 6, max_leg_frac: float = 0.35) -> np.ndarray:
+    """Significance brackets: an isolated thin horizontal rule plus the short legs at its ends.
+
+    Run-based on purpose. An earlier connected-component version grew through every
+    gridline the bracket legs crossed and wiped the whole grid.
+
+    A gridline is rejected because the dark coverage of its ROW exceeds `max_len_px`,
+    which stays true when bars chop the gridline into bracket-sized pieces.
+    An error-bar cap is rejected by `min_len_px`, a bar top by it as well.
+    """
+    out = np.zeros_like(d)
+    di = d & inside
+    if not di.any():
+        return out
+    rows_in = np.flatnonzero(inside.any(1))
+    if len(rows_in) < 3:
+        return out
+    y_lo, y_hi = int(rows_in[0]) + edge, int(rows_in[-1]) - edge
+    plot_h = int(rows_in[-1] - rows_in[0])
+    max_leg = max(4, int(max_leg_frac * plot_h))
+
+    thin_v = _run_thickness(di, 0, 2 * max_thick + 3) <= max_thick
+    cand = di & thin_v
+
+    for y in range(max(0, y_lo), min(d.shape[0], y_hi + 1)):
+        row = cand[y]
+        if not row.any():
+            continue
+        if int(di[y].sum()) > max_len_px:          # gridline / frame / reference line row
+            continue
+        for a, b in _runs_1d(row, max_gap=1):
+            if not (min_len_px <= b - a + 1 <= max_len_px):
+                continue
+            out[y, a:b + 1] = True
+            cols_in = np.flatnonzero(inside[y])
+            x_lo, x_hi = int(cols_in[0]) + edge, int(cols_in[-1]) - edge
+            for x0 in (a, b):                       # the legs, at the two ends only
+                if not (x_lo <= x0 <= x_hi):        # at the frame: that is an axis, not a leg
+                    continue
+                for x in range(max(0, x0 - 2), min(d.shape[1], x0 + 3)):
+                    for step in (1, -1):
+                        leg, yy = [], y + step
+                        while 0 <= yy < d.shape[0] and inside[yy, x] and d[yy, x] \
+                                and len(leg) <= max_leg:
+                            leg.append(yy)
+                            yy += step
+                        if not (4 <= len(leg) <= max_leg):   # a leg ends; an axis does not
+                            continue
+                        if _free_sides(d, leg, x):           # a hairline, not a steep curve
+                            out[leg, x] = True
+    return out
+
+
+# ───────────────────────── glyphs ─────────────────────────
+def _blobs(d: np.ndarray, inside: np.ndarray, max_h: int, max_w: int) -> List[Tuple[slice, slice]]:
+    lab, n = ndimage.label(d & inside, structure=np.ones((3, 3), bool))
+    out = []
+    for sl in ndimage.find_objects(lab):
+        if sl is None:
+            continue
+        h_, w_ = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        if 2 <= h_ <= max_h and 2 <= w_ <= max_w:
+            out.append(sl)
+    return out
+
+
+def glyphs_above_brackets(d: np.ndarray, inside: np.ndarray, brackets: np.ndarray,
+                          text_h: float) -> np.ndarray:
+    """Small blobs within ~2 text heights ABOVE a bracket: the `***` that labels it."""
+    out = np.zeros_like(d)
+    if not brackets.any():
+        return out
+    reach = int(max(6, 2.2 * text_h))
+    # a pixel is "under consideration" if a bracket pixel exists below it within `reach`
+    below = np.zeros_like(brackets)
+    for s in range(1, reach + 1):
+        below[:-s] |= brackets[s:]
+    for sl in _blobs(d, inside, max_h=int(2.0 * text_h) + 2, max_w=int(3.0 * text_h) + 4):
+        if below[sl].any():
+            out[sl] |= d[sl]
+    return out
+
+
+def token_glyphs(shape, tokens: Sequence[Any], inside: np.ndarray,
+                 drop_plus: bool) -> np.ndarray:
+    """Pixels of OCR tokens whose TEXT is a significance mark (and `+` when allowed)."""
+    out = np.zeros(shape[:2], bool)
+    for t in tokens or []:
+        txt = str(getattr(t, "text", "")).strip()
+        if not txt:
+            continue
+        hit = bool(SIG_TEXT_RX.match(txt)) or (drop_plus and bool(PLUS_TEXT_RX.match(txt)))
+        if not hit:
+            continue
+        x1, y1 = int(getattr(t, "x1", 0)), int(getattr(t, "y1", 0))
+        x2, y2 = int(getattr(t, "x2", 0)), int(getattr(t, "y2", 0))
+        pad = 1
+        sl = (slice(max(0, y1 - pad), y2 + pad), slice(max(0, x1 - pad), x2 + pad))
+        if inside[sl].any():
+            out[sl] = True
+    return out
+
+
+def _same_shape(d: np.ndarray, boxes: Sequence[Tuple[slice, slice]],
+                min_iou: float = 0.72, grid: int = 9) -> bool:
+    """Do these blobs draw the SAME glyph? Each patch is rasterised onto a small
+    square and compared by IoU with the median patch. A row of '+' passes; a row of
+    tick labels ('10', '12', '14' ... one blob per digit) does not."""
+    pats = []
+    for sl in boxes:
+        patch = d[sl]
+        if patch.size == 0:
+            return False
+        ys = np.linspace(0, patch.shape[0] - 1, grid).round().astype(int)
+        xs = np.linspace(0, patch.shape[1] - 1, grid).round().astype(int)
+        pats.append(patch[np.ix_(ys, xs)].astype(np.float32))
+    ref = np.median(np.stack(pats), axis=0) >= 0.5
+    if not ref.any():
+        return False
+    ious = []
+    for p in pats:
+        b = p >= 0.5
+        inter = float((b & ref).sum())
+        union = float((b | ref).sum()) or 1.0
+        ious.append(inter / union)
+    return float(np.mean(ious)) >= min_iou
+
+
+def annotation_rows(d: np.ndarray, inside: np.ndarray, text_h: float,
+                    min_count: int = 4, min_span: float = 0.35,
+                    y_tol: float = 3.0, size_tol: int = 2) -> np.ndarray:
+    """A row of IDENTICAL small glyphs at a constant y, spread across the plot.
+
+    This is the ``+  +  +  +  +`` row of Fig. 4B: an annotation, not a series.
+    A real series that happened to be flat is drawn with a connecting line, so its
+    markers are one wide connected component, not many separate equal blobs.
+
+    The search is done per glyph SIZE class first, so a row of equal glyphs is not
+    diluted by the ordinary text and data labels that share its y band.
+    """
+    out = np.zeros_like(d)
+    cols = np.flatnonzero(inside.any(0))
+    if len(cols) < 2:
+        return out
+    width = cols[-1] - cols[0]
+    lim = int(1.8 * text_h) + 2
+    boxes = _blobs(d, inside, max_h=lim, max_w=lim)
+    if len(boxes) < min_count:
+        return out
+
+    hs = np.array([sl[0].stop - sl[0].start for sl in boxes])
+    ws = np.array([sl[1].stop - sl[1].start for sl in boxes])
+    cy = np.array([(sl[0].start + sl[0].stop) / 2.0 for sl in boxes])
+    cx = np.array([(sl[1].start + sl[1].stop) / 2.0 for sl in boxes])
+
+    used = np.zeros(len(boxes), bool)
+    for i in np.argsort(-(hs * ws)):                       # biggest glyph first
+        if used[i] or hs[i] < 4 or ws[i] < 4:
+            continue
+        same = (np.abs(hs - hs[i]) <= size_tol) & (np.abs(ws - ws[i]) <= size_tol) & ~used
+        for j in np.flatnonzero(same):
+            row = same & (np.abs(cy - cy[j]) <= max(y_tol, 0.3 * text_h))
+            k = np.flatnonzero(row)
+            if len(k) < min_count:
+                continue
+            if (cx[k].max() - cx[k].min()) < min_span * width:
+                continue
+            if not _same_shape(d, [boxes[m] for m in k]):
+                continue                 # digits of a tick-label row are the same SIZE but
+            for m in k:                  # not the same SHAPE; a row of '+' is both
+                out[boxes[m]] |= d[boxes[m]]
+                used[m] = True
+            break
+    return out
+
+
+# ───────────────────────── public API ─────────────────────────
+def clean_chart(arr: np.ndarray, box: Box, exclude: Sequence[Box] = (),
+                tokens: Sequence[Any] = (), stage1: Optional[dict] = None,
+                text_h: float = 11.0, margin: int = 3,
+                min_bracket_frac: float = 0.06,
+                max_bracket_frac: float = 0.75,
+                glyph_dark: int = 135, line_dark: int = 190,
+                drop_blobs: bool = True,
+                zero_px: Optional[float] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Return (image with the annotations painted white, what was removed).
+
+    box     : plot area in pixels, as GraphGrounder computes it
+    exclude : legend / inset boxes (left untouched, the legend must stay readable)
+    tokens  : OCR tokens (``GraphGrounder._ocr_tokens``); optional but much safer
+    stage1  : used only to decide whether `+` is a real marker of some series
+    """
+    arr = np.asarray(arr)
+    inside = _box_mask(arr.shape, box, shrink=margin)
+    for ex in exclude or []:
+        inside &= ~_box_mask(arr.shape, ex)
+    # glyphs are printed black; the bracket rules themselves are often thin gray
+    d = _dark(arr, dark=glyph_dark)
+    d_line = _dark(arr, dark=line_dark, max_chroma=40)
+
+    x1, _, x2, _ = box
+    min_len = int(max(10, min_bracket_frac * abs(x2 - x1)))
+    max_len = int(max_bracket_frac * abs(x2 - x1))
+
+    markers = " ".join(str((s or {}).get("marker", "")).lower()
+                       for s in ((stage1 or {}).get("series") or []))
+    drop_plus = not any(p in markers for p in PLUS_MARKERS)
+    if any(str((s or {}).get("marker", "")).strip().lower() in ("none", "", "unknown", "-")
+           and str((s or {}).get("line", "")).strip().lower() in ("none", "", "unknown", "-")
+           for s in ((stage1 or {}).get("series") or [])):
+        drop_blobs = False                 # a bar chart: a bar is tall and solid too
+
+    br = bracket_mask(d_line, inside, min_len_px=min_len, max_len_px=max_len)
+    gl = glyphs_above_brackets(d, inside, br, text_h)
+    tk = token_glyphs(arr.shape, tokens, inside, drop_plus)
+    # a row of tick labels sits just outside the plot and looks exactly like an
+    # annotation row, so glyph rows are searched in the eroded interior only
+    pad = int(max(4, 1.2 * text_h))
+    core = ndimage.binary_erosion(inside, np.ones((2 * pad + 1, 1), bool))
+    rw = annotation_rows(d, core, text_h) if drop_plus else np.zeros_like(d)
+
+    bl = solid_blob_mask(arr, inside, zero_px=zero_px) if drop_blobs \
+        else np.zeros(arr.shape[:2], bool)
+
+    kill = (br | gl | tk | rw) & inside
+    kill = ndimage.binary_dilation(kill, np.ones((3, 3), bool)) & _dark(arr, dark=200, max_chroma=60) & inside
+    # coloured blobs are erased with their anti-aliased rim, not through the dark test
+    kill |= ndimage.binary_dilation(bl, np.ones((3, 3), bool)) & inside
+
+    out = arr.copy()
+    out[kill] = 255
+    info = {"brackets_px": int(br.sum()), "glyphs_px": int(gl.sum()),
+            "token_px": int(tk.sum()), "row_px": int(rw.sum()),
+            "blob_px": int(bl.sum()),
+            "total_px": int(kill.sum()), "plus_removed": bool(drop_plus)}
+    return out, info
+
+
+def solid_blob_mask(arr: np.ndarray, inside: np.ndarray, min_chroma: int = 60,
+                    min_aspect: float = 2.2, min_fill: float = 0.40,
+                    min_h_frac: float = 0.06, zero_px: Optional[float] = None,
+                    foot: float = 0.02) -> np.ndarray:
+    """Tall solid coloured glyphs inside the plot: dosing arrows, pointers, big triangles.
+
+    They are the worst kind of non-data ink, because they are the SAME colour family as a
+    series. In 10.1016/j.actbio.2017.08.034 Fig. 4B the five blue dosing arrows take the
+    'free Combo' colour, so the digitizer reads the arrows instead of the curve and
+    `shared_x_positions` returns the arrow positions as the data x.
+
+    A curve is thin: it fills ~5% of its bounding box. A marker is small and square.
+    An arrow is tall (h >= 2.2 w), solid (fill >= 0.40) and a real fraction of the plot.
+
+    Pass `zero_px` (and keep `drop_blobs` off for bar charts): a BAR is also tall and
+    solid, but it stands on the baseline, so anything whose foot touches the baseline or
+    the bottom of the plot is kept.
+    """
+    out = np.zeros(arr.shape[:2], bool)
+    a = arr.astype(int)
+    chrom = ((a.max(2) - a.min(2)) >= min_chroma) & inside
+    if not chrom.any():
+        return out
+    rows_in = np.flatnonzero(inside.any(1))
+    plot_h = float(rows_in[-1] - rows_in[0]) or 1.0
+    bottom = float(rows_in[-1])
+    lab, n = ndimage.label(chrom, structure=np.ones((3, 3), bool))
+    for i, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        bh = sl[0].stop - sl[0].start
+        bw = sl[1].stop - sl[1].start
+        if bh < min_h_frac * plot_h or bw < 3:
+            continue
+        if bh < min_aspect * bw:
+            continue
+        m = (lab[sl] == i)
+        if m.sum() < min_fill * bh * bw:
+            continue
+        base = sl[0].stop - 1
+        if abs(base - bottom) <= foot * plot_h:              # a bar on the axis
+            continue
+        if zero_px is not None and abs(base - zero_px) <= foot * plot_h:
+            continue
+        out[sl] |= m
+    return out
+
+
+def text_height(tokens: Sequence[Any], default: float = 11.0) -> float:
+    """Median height of the OCR tokens: the natural length unit of a figure."""
+    hs = [float(getattr(t, "y2", 0)) - float(getattr(t, "y1", 0)) for t in tokens or []]
+    hs = [h for h in hs if 4 <= h <= 60]
+    return float(np.median(hs)) if hs else default
+
+
+def achromatic_mask(arr: np.ndarray, region: np.ndarray,
+                    other_masks: Sequence[np.ndarray] = (),
+                    dark: int = 135, min_size: int = 6) -> np.ndarray:
+    """Pixels of a BLACK / GRAY series: dark achromatic ink inside the plot, minus the
+    axis lines, the frame, the text and every coloured series.
+
+    Use it after `clean_chart`, so the significance ink is already gone. It lets the
+    colour digitizer handle a black control series (PBS, Saline, Control) instead of
+    falling back to the VLM, which is where most of the instability comes from.
+    """
+    d = _dark(arr, dark=dark) & region
+    if not d.any():
+        return d
+    for m in other_masks or ():
+        d &= ~ndimage.binary_dilation(np.asarray(m, bool), np.ones((3, 3), bool))
+    # long straight runs = axis lines / frame / gridlines
+    h, w = d.shape
+    lines = ndimage.binary_opening(d, np.ones((1, max(25, w // 12)), bool)) | \
+            ndimage.binary_opening(d, np.ones((max(25, h // 12), 1), bool))
+    d &= ~ndimage.binary_dilation(lines, np.ones((3, 3), bool))
+    lab, n = ndimage.label(d, structure=np.ones((3, 3), bool))
+    if n:
+        sizes = ndimage.sum(d, lab, range(1, n + 1))
+        d &= np.isin(lab, np.flatnonzero(sizes >= min_size) + 1)
+    return d
+
+# ═════════════════════════ axis helpers ═════════════════════════
 class LinearMap:
     """value = a * pixel + b  (or 10**(a*pixel+b) when log). Built from tick pairs,
     or wrap an existing NumericAxis with LinearMap.from_axis(axis)."""
@@ -2431,7 +895,7 @@ class LinearMap:
         return cls(float(a), float(b), log)
 
     @classmethod
-    def from_axis(cls, axis):                       # NumericAxis
+    def from_axis(cls, axis):                       # NumericAxis from grounding_utils
         return cls(float(axis.a), float(axis.b), bool(axis.log))
 
     def value(self, p: float) -> float:
@@ -2490,23 +954,20 @@ def _fmt(v: float) -> str:
     return s
 
 
-# ───────────────────────── drawing ─────────────────────────
+# ═════════════════════════ drawing ═════════════════════════
 def draw_value_grid(image_path: str, out_path: str,
                     x_map: Optional[Any], y_map: Any, box: Tuple[float, float, float, float],
                     upscale: Optional[float] = None, target_width: int = 1100,
                     y_labels: int = 25, x_labels: int = 20,
                     x_positions: Optional[Sequence[float]] = None,
                     exclude: Sequence[Tuple[float, float, float, float]] = (),
-                    bg_threshold: int = 225,
-                    marks: Sequence[Tuple[float, str]] = ()) -> Dict[str, Any]:
+                    bg_threshold: int = 225) -> Dict[str, Any]:
     """Draw a data-unit grid inside the plot box and save it.
 
     x_map / y_map : LinearMap or NumericAxis (x_map=None for categorical x / bars)
     box           : plot area in ORIGINAL pixels (x1, y1, x2, y2)
     x_positions   : optional data-x values to mark with a dashed vertical guide
                     (e.g. the shared x of the markers found by the colour digitizer)
-    marks         : optional [(x in ORIGINAL pixels, "label")] written in the TOP margin with a
-                    dashed guide down to the plot (bar numbers '#1', '#2' ...)
     Returns the grid description used to build the prompt."""
     if y_map is not None and not isinstance(y_map, LinearMap):
         y_map = LinearMap.from_axis(y_map)
@@ -2577,12 +1038,6 @@ def draw_value_grid(image_path: str, out_path: str,
                 for r in range(y1, y2 + 1):
                     if (r // 6) % 2 == 0:
                         layer[r, c] = 3
-    for xp, _ in marks or []:                         # dashed guides at the numbered bars
-        c = int(round(xp * k))
-        if x1 <= c <= x2:
-            for r in range(y1, y2 + 1):
-                if (r // 6) % 2 == 0:
-                    layer[r, c] = 3
 
     colours = {1: (222, 222, 222), 2: (165, 165, 165), 3: (120, 120, 120)}
     for lvl, col in colours.items():
@@ -2602,22 +1057,15 @@ def draw_value_grid(image_path: str, out_path: str,
     for c, v in x_cols:
         d.line([(c + ml, mt - 6), (c + ml, mt)], fill=(90, 90, 90))
         d.text((c + ml, mt - 8), _fmt(v), fill=(40, 40, 40), font=font, anchor="mb")
-    bold = _font(max(14, int(H / 50)))
-    for xp, lab in marks or []:
-        c = int(round(xp * k)) + ml
-        d.line([(c, mt - 6), (c, mt)], fill=(200, 0, 0))
-        d.text((c, mt - 8), str(lab), fill=(200, 0, 0), font=bold, anchor="mb")
     canvas.save(out_path)
     desc.update({"path": out_path, "scale": k, "offset": (ml, mt)})
     return desc
 
 
-# ───────────────────────── prompting ─────────────────────────
+# ═════════════════════════ prompting ═════════════════════════
 def build_grid_read_prompt(series: Dict[str, str], grid: Dict[str, Any],
-                           x_values: Optional[Sequence[Any]] = None, faded: bool = False,
-                           bar_ids: Optional[Sequence[str]] = None) -> dict:
-    """Prompt dict (same keys as your PromptFormatter) to read ONE series.
-    bar_ids: numbers written above the bars of this series ('#1', '#2' ...) -> one value per number."""
+                           x_values: Optional[Sequence[Any]] = None, faded: bool = False) -> dict:
+    """Prompt dict (same keys as your PromptFormatter) to read ONE series."""
     name, color = series.get("name", "UNKNOWN"), series.get("color", "UNKNOWN")
     marker = series.get("marker", "UNKNOWN")
     if grid["y_log"]:
@@ -2627,20 +1075,13 @@ def build_grid_read_prompt(series: Dict[str, str], grid: Dict[str, Any],
     else:
         ygrid = (f"Light gray horizontal lines are every {_fmt(grid['y_minor'])} units; darker lines every "
                  f"{_fmt(grid['y_major'])} units, labelled on the RIGHT side of the image.")
-        precision = (f"Read each value to the nearest {_fmt(grid['y_minor'] / 2)}; a value BETWEEN two "
-                     "lines is normal, do not round it to the nearest line.")
+        precision = f"Read each value to the nearest {_fmt(grid['y_minor'] / 2)}."
     if grid.get("x_minor"):
         xgrid = (f" Vertical gray lines are every {_fmt(grid['x_minor'])} units; darker ones every "
                  f"{_fmt(grid['x_major'])}, labelled at the TOP of the image.")
     else:
         xgrid = " The x axis is categorical: use the category names under the axis."
-    first_col = "x"
-    if bar_ids:
-        task = (f'The bars of the series "{name}" (color={color}) are numbered {", ".join(bar_ids)} in red at the '
-                "TOP of the image, with a dashed line down to each bar. Give the height of every numbered bar.")
-        xgrid = ""
-        first_col = "bar number"
-    elif x_values:
+    if x_values:
         task = (f'For the series "{name}" (color={color}, marker={marker}) give its y value at each of these x '
                 f"values: {list(x_values)}. Dashed vertical lines mark these x positions.")
     else:
@@ -2654,16 +1095,16 @@ def build_grid_read_prompt(series: Dict[str, str], grid: Dict[str, Any],
         "definitions": {},
         "objective": f"{task} {ygrid}{xgrid} {precision}",
         "answer_schema": {
-            "Format": f"{first_col} | y   (one per line)",
+            "Format": "x | y   (one point per line)",
             "Rules": "\n".join([
                 "- Use the grid lines and their labels, not the original tick labels.",
                 "- Use the CENTER of the marker (or the TOP of a bar; the BOTTOM for negative bars).",
                 "- Ignore error bars, the legend and any inset plot.",
-                f"- If the series is not visible at a {first_col}, write {first_col} | NA.",
+                "- If the series is not visible at an x value, write x | NA.",
                 "- Never repeat a point. Stop after the last point.",
             ]),
         },
-        "conclusion": f"Return ONLY the lines in the format {first_col} | y. No explanations.",
+        "conclusion": "Return ONLY the lines in the format x | y. No explanations.",
     }
 
 
@@ -2677,7 +1118,6 @@ def parse_grid_answer(text: str, max_points: int = 60) -> List[List[Any]]:
         if "|" not in line:
             continue
         xs, ys = [p.strip() for p in line.split("|", 1)]
-        xs = xs.strip("-* ").strip()
         my = re.search(_NUM, ys.replace("−", "-"))
         if not my:
             continue
@@ -2694,17 +1134,23 @@ def parse_grid_answer(text: str, max_points: int = 60) -> List[List[Any]]:
     return pts
 
 
-# ───────────────────────── fading the other series ─────────────────────────
+# ═════════════════════════ fading the other series ═════════════════════════
 def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_rgb: Optional[Sequence[float]],
                       box: Tuple[float, float, float, float], exclude: Sequence[Tuple[float, float, float, float]],
-                      out_path: str, strength: float = 0.85, min_chroma: int = 25) -> Optional[str]:
+                      out_path: str, strength: float = 0.85, min_chroma: int = 25,
+                      same_tol: float = 20.0) -> Optional[str]:
     """Copy of the figure where every COLOURED pixel of the plot area that does not belong to the
     target series is blended towards white. Axes, text, black error bars and the legend
     (excluded box) are untouched, so the VLM still sees the scale and which series it reads.
     Each coloured pixel goes to the nearest palette colour, measured to the segment
     colour -> white, so the anti-aliased (lighter) edges of lines and markers count too.
     palette  : all series colours detected in the plot (GraphGrounder.last_palette)
-    keep_rgb : colour of the series being read (None for a black/gray series -> fade all colours)"""
+    keep_rgb : colour of the series being read (None for a black/gray series -> fade all colours)
+
+    Palette entries within `same_tol` of keep_rgb are dropped before the comparison. Without
+    that, a figure with two clusters of one hue (a blue curve and blue dosing arrows) fades
+    the target series itself: its own pixels are nearer the OTHER cluster than to keep_rgb.
+    """
     arr = np.asarray(Image.open(image_path).convert("RGB")).astype(float)
     h, w = arr.shape[:2]
     region = np.zeros((h, w), bool)
@@ -2723,7 +1169,14 @@ def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_
         t = np.clip(((px - c) @ v) / max(1e-6, float(v @ v)), 0, 0.9)
         return np.linalg.norm(px - (c + t[:, None] * v), axis=1)
 
-    d_all = np.stack([seg_dist(c) for c in palette], axis=1)
+    if keep_rgb is None:
+        others = list(palette)
+    else:
+        k = np.asarray(keep_rgb, float)
+        others = [c for c in palette if np.linalg.norm(np.asarray(c, float) - k) > same_tol]
+    if not others:
+        return None
+    d_all = np.stack([seg_dist(c) for c in others], axis=1)
     if keep_rgb is None:
         fade_px = np.ones(len(px), bool)
     else:
@@ -2738,248 +1191,150 @@ def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_
     return out_path
 
 
-def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]], max_dist: float = 45.0
-                   ) -> Tuple[bool, str]:
-    """May the other series be faded for this one? Never when it could fade the target itself:
-    * a coloured series whose plot colour was not found (keep_rgb None would fade ALL colours);
-    * the plot colour assigned to it is far from its legend swatch (wrong colour match:
-      in actbio Figure 42 GEM (red) was faded and PBS (black) kept)."""
-    cname = str(series.get("color", ""))
-    if is_achromatic(cname):
-        return True, "black/gray series: all colours faded"
-    want = name_to_rgb(cname)
-    if keep_rgb is None:
-        return False, "colour of the series not found in the plot"
-    if want is not None and colour_match_score(want, keep_rgb, 1, 1) is None:
-        return False, f"plot colour {tuple(int(v) for v in keep_rgb)} far from legend colour {cname}"
-    return True, "ok"
+# ═════════════════════════ pipeline ═════════════════════════
+def _zero_pixel(y_map) -> Optional[float]:
+    try:
+        if y_map is None or getattr(y_map, "log", False):
+            return None
+        return float(y_map.pixel(0.0))
+    except Exception:
+        return None
 
 
-# ───────────────────────── pipeline ─────────────────────────
 def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: float = 1.0,
-                 ask_at_data_x: bool = True, fade_others: bool = True, fuse: bool = True,
-                 number_bars: bool = True, gray_list: Optional[str] = None,
-                 stage1_raw: Optional[str] = None) -> Dict[str, Any]:
-    """Calibrate with GraphGrounder, draw the value grid, ask the VLM ONE series per
-    call, and fuse the answer with the pixel result.
+                 ask_at_data_x: bool = True, fade_others: bool = True,
+                 clean_annotations: bool = True) -> Dict[str, Any]:
+    """Calibrate with GraphGrounder, remove the non-data ink, draw the value grid, ask the
+    VLM ONE series per call, and compare with the pixel result.
 
-    grounder : GraphGrounder (its VLM and prompt template are reused)
+    grounder : graph_grounder.GraphGrounder (its VLM and prompt template are reused)
+    clean_annotations : after the first calibration pass the plot box is known, so the
+                  annotations can be painted white and the digitizer RE-RUN on the clean
+                  image (<base>_clean.png). This is what stops a dosing arrow from being
+                  read as a series and poisoning `data_x`.
     fade_others : one grid image PER SERIES in which the other coloured series are faded
-                  (<base>_grid_<series name>.png); the plain <base>_grid.png is kept for the overlay.
-    stage1_raw : optional raw VLM text of stage 1, saved in <base>_stage1.json with the parsed dict.
-    gray_list : text file that collects the names of black/white charts (to check by hand later);
-                default <parent of out_dir>/grayscale_images.txt, "" = do not write it.
-    fuse : keep the pixel value where it agrees with the VLM within one minor grid step.
-    number_bars : bar series found by colour are numbered #1.. at the top; the VLM reads per number.
-    Returns {"grid": {series: [[x, y], ...]}, "grid_vlm": raw VLM points, "sources": {series: [...]},
-             "pixel": {...}, "agreement": {...}, "stage1": stage 1 actually used, "grid_image": path, ...}
+                  (<base>_grid_s<i>.png); the plain <base>_grid.png is kept for the overlay.
+    Returns {"grid": {series: [[x, y], ...]}, "pixel": {...}, "agreement": {...}, "grid_image": path}
     """
-    stage1_in = copy.deepcopy(stage1)                 # exactly what the stage-1 parser returned
+    from xlmexlab.prompt import PromptFormatter
+
+    try:
+        from .graph_grounder import normalize_stage1
+    except ImportError:
+        from graph_grounder import normalize_stage1
     stage1 = normalize_stage1(stage1)
-    # calibration only: debug_dir=None, so C's *_grounded.png is NOT written into D's folder
-    pixel = grounder.extract(image_path, stage1, scale=scale, debug_dir=None)
-    cal = getattr(grounder, "last_calibration", {}) or {}
-    stage1 = getattr(grounder, "last_stage1", None) or stage1    # legend-fixed names + legend colours
-    palette = getattr(grounder, "last_palette", []) or []
-    series_rgb = getattr(grounder, "last_series_rgb", {}) or {}
-    points_px = getattr(grounder, "last_points_px", {}) or {}
-    if gray_list is None:
-        gray_list = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "grayscale_images.txt")
-    is_table = (getattr(grounder, "last_diagnostics", {}) or {}).get("error") == "looks like a table"
-    gray = (not is_table) and is_grayscale_image(image_path, cal.get("box"), cal.get("exclude", ()))
-    if gray and gray_list:
-        note_image(gray_list, os.path.basename(image_path))
-    stage1_path = save_stage1(out_dir, image_path, stage1_in, stage1, stage1_raw)
-    if not cal.get("y_map"):
-        err = (getattr(grounder, "last_diagnostics", {}) or {}).get("error") or "axis calibration failed"
-        return {"grid": {}, "pixel": pixel, "agreement": {}, "error": err, "stage1": stage1,
-                "stage1_file": stage1_path}
 
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
+
+    # calibration only: debug_dir=None, so C's *_grounded.png is NOT written into D's folder
+    pixel = grounder.extract(image_path, stage1, scale=scale, debug_dir=None)
+    cal = getattr(grounder, "last_calibration", {}) or {}
+
+    # ── remove the non-data ink and read the pixels again on the clean image ──
+    src, ann = image_path, None
+    if clean_annotations and cal.get("box"):
+        tokens = getattr(grounder, "_ocr_tokens", ()) or ()
+        arr = np.asarray(Image.open(image_path).convert("RGB"))
+        cleaned, ann = clean_chart(arr, cal["box"], exclude=cal.get("exclude", ()),
+                                   tokens=tokens, stage1=stage1,
+                                   text_h=text_height(tokens),
+                                   zero_px=_zero_pixel(cal.get("y_map")))
+        print(f"  [grid_extract] annotation filter: {ann}")
+        if ann["total_px"] > 0:
+            src = os.path.join(out_dir, f"{base}_clean.png")
+            Image.fromarray(cleaned).save(src)
+            pixel = grounder.extract(src, stage1, scale=scale, debug_dir=None)
+            cal = getattr(grounder, "last_calibration", {}) or cal
+
+    stage1 = getattr(grounder, "last_stage1", None) or stage1    # colours read from the legend symbols
+    palette = getattr(grounder, "last_palette", []) or []
+    series_rgb = getattr(grounder, "last_series_rgb", {}) or {}
+    if not cal.get("y_map"):
+        return {"grid": {}, "pixel": pixel, "agreement": {}, "error": "axis calibration failed",
+                "annotations": ann}
+
+    # ── the x positions to ask at, if the pixel pass found enough of them ──
+    data_x = cal.get("data_x") if ask_at_data_x else None
+    n_ticks = len(cal.get("x_ticks_px") or [])
+    if data_x and len(data_x) < max(3, 0.8 * n_ticks):
+        # asking at 2 positions when the axis has 6 ticks caps EVERY series at 2 points
+        print(f"  [grid_extract] only {len(data_x)} pixel x positions for {n_ticks} x ticks "
+              f"-> reading the series open-ended instead")
+        data_x = None
+
     grid_path = os.path.join(out_dir, f"{base}_grid.png")
-    x_map = cal.get("x_map")
-    data_x = list(cal.get("data_x") or []) if ask_at_data_x else []
-    guide_source = "colour markers" if data_x else None
-    if ask_at_data_x and not data_x and x_map is not None:
-        # black / gray charts: x positions from the dark markers
-        cols = dark_marker_columns(image_path, cal["box"], cal.get("exclude", ()))
-        data_x = [round(x_map.value(c), 6) for c in cols]
-        guide_source = "dark markers" if data_x else None
-    g = draw_value_grid(image_path, grid_path, x_map, cal["y_map"], cal["box"],
+    g = draw_value_grid(src, grid_path, cal.get("x_map"), cal["y_map"], cal["box"],
                         exclude=cal.get("exclude", ()), x_positions=data_x or None)
 
-    vlm_out: Dict[str, Any] = {}
     out: Dict[str, Any] = {}
-    sources: Dict[str, List[str]] = {}
-    raw_log: Dict[str, Any] = {"guides": {"source": guide_source, "data_x": data_x}, "grayscale": gray,
-                               "excluded_regions": cal.get("exclude_info", []), "series": {}}
     faded_paths: Dict[str, str] = {}
-    bar_px: Dict[str, Dict[str, float]] = {}            # {series: {category: x pixel}} for the overlay
-    all_series = stage1.get("series", [])
-    tags = series_file_tags([s.get("name", "UNKNOWN") for s in all_series])
-    for i, s in enumerate(all_series):
+    for i, s in enumerate(stage1.get("series", [])):
         name = s.get("name", "UNKNOWN")
-        tag = tags[i]
-        ask_path, faded, note = grid_path, False, None
-        # numbered bars (bar charts read by colour): exact x of every bar of this series
-        marks, bar_labels = [], []
-        if number_bars and x_map is None and grounder._is_bar(s):
-            bars = [p for p in points_px.get(name, []) if str(p.get("method", "")).startswith("color")]
-            for j, p in enumerate(sorted(bars, key=lambda q: q["x_px"]), start=1):
-                marks.append((p["x_px"], f"#{j}"))
-                bar_labels.append(p["x"])
-        src_img = image_path
-        if fade_others and len(all_series) > 1 and palette:
-            ok, note = fade_target_ok(s, series_rgb.get(name))
-            if ok:
-                tmp = os.path.join(out_dir, f"{base}_faded_{tag}.png")
-                if fade_other_series(image_path, palette, series_rgb.get(name), cal["box"],
-                                     cal.get("exclude", ()), tmp):
-                    src_img, faded = tmp, True
-        if faded or marks:
-            ask_path = os.path.join(out_dir, f"{base}_grid_{tag}.png")
-            draw_value_grid(src_img, ask_path, x_map, cal["y_map"], cal["box"],
-                            exclude=cal.get("exclude", ()), x_positions=data_x or None, marks=marks)
-        if faded:
-            os.remove(src_img)
-            faded_paths[name] = ask_path
-        fm = PromptFormatter(**build_grid_read_prompt(s, g, data_x or None, faded=faded,
-                                                      bar_ids=[m[1] for m in marks] or None))
+        ask_path, faded = grid_path, False
+        if fade_others and len(stage1.get("series", [])) > 1 and palette:
+            tmp = os.path.join(out_dir, f"{base}_faded_s{i}.png")
+            if fade_other_series(src, palette, series_rgb.get(name), cal["box"],
+                                 cal.get("exclude", ()), tmp):
+                ask_path = os.path.join(out_dir, f"{base}_grid_s{i}.png")
+                draw_value_grid(tmp, ask_path, cal.get("x_map"), cal["y_map"], cal["box"],
+                                exclude=cal.get("exclude", ()), x_positions=data_x or None)
+                os.remove(tmp)
+                faded, faded_paths[name] = True, ask_path
+        fm = PromptFormatter(**build_grid_read_prompt(s, g, data_x or None, faded=faded))
         fm.model_post_init(grounder.template)
         raw = grounder.vlm.run_image_single_prompt_rescale(fm.format_prompt("<image>"), ask_path, scale=1.0)
-        print(f"\n  [grid_extract] {name} RAW:\n{raw}")
-        pts = parse_grid_answer(raw)
-        if marks:                                       # '#3 | 12.5' -> (category of bar 3, 12.5)
-            pts = bars_to_categories(pts, bar_labels)
-            bar_px[name] = {str(lab): xp for (xp, _), lab in zip(marks, bar_labels)}
-        elif x_map is not None and data_x:              # numeric x: snap to the guides
-            pts = snap_x_to_guides(pts, data_x, drop_far=(guide_source == "colour markers"))
-        elif x_map is None:                             # categorical x: category names
-            pts = match_categories(pts, [lab for _, lab in cal.get("x_cat", [])],
-                                   extra=[str(t) for t in stage1.get("x_ticks") or [] if t not in (None, "")])
-        vlm_out[name] = pts
-        if fuse:
-            out[name], sources[name] = fuse_with_pixels(pts, pixel.get(name), g, x_map, data_x)
-        else:
-            out[name], sources[name] = pts, ["vlm"] * len(pts)
-        raw_log["series"][name] = {"image": os.path.basename(ask_path), "faded": faded, "fade_note": note,
-                                   "bars_numbered": len(marks), "raw": raw, "parsed": pts,
-                                   "final": out[name], "sources": sources[name]}
+        print(f"\n  [grid_extract] {s.get('name')} RAW:\n{raw}")
+        out[s.get("name", "UNKNOWN")] = parse_grid_answer(raw)
 
     read_path = os.path.join(out_dir, f"{base}_grid_read.png")
     try:
-        draw_grid_answers(grid_path, read_path, out, g, cal, pixel=pixel, series_rgb=series_rgb,
-                          stage1=stage1, bar_px=bar_px, sources=sources)
+        draw_grid_answers(grid_path, read_path, out, g, cal)
     except Exception as e:                                  # an overlay must never break the run
         print(f"  [grid_extract] overlay not saved: {type(e).__name__}: {e}")
-    raw_path = os.path.join(out_dir, f"{base}_raw.json")
-    try:
-        raw_log["diagnostics"] = _jsonable(getattr(grounder, "last_diagnostics", {}))
-        with open(raw_path, "w", encoding="utf-8") as f:
-            json.dump(_jsonable(raw_log), f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"  [grid_extract] raw answers not saved: {type(e).__name__}: {e}")
-    return {"grid": out, "grid_vlm": vlm_out, "sources": sources, "pixel": pixel, "grayscale": gray,
-            "agreement": compare_series(vlm_out, pixel, cal["y_map"]), "stage1": stage1,
+    return {"grid": out, "pixel": pixel, "agreement": compare_series(out, pixel, cal["y_map"]),
             "grid_image": grid_path, "grid_read_image": read_path, "faded_grid_images": faded_paths,
-            "raw_answers": raw_path, "stage1_file": stage1_path}
+            "clean_image": src if src != image_path else None, "annotations": ann}
 
 
 _PALETTE = [(220, 0, 0), (0, 110, 230), (0, 160, 0), (200, 0, 200), (230, 120, 0), (0, 170, 170)]
 
 
 def draw_grid_answers(grid_path: str, out_path: str, answers: Dict[str, List], grid: Dict[str, Any],
-                      cal: Dict[str, Any], pixel: Optional[Dict[str, Any]] = None,
-                      series_rgb: Optional[Dict[str, Sequence[float]]] = None,
-                      stage1: Optional[dict] = None, bar_px: Optional[Dict[str, Dict[str, float]]] = None,
-                      sources: Optional[Dict[str, List[str]]] = None) -> str:
-    """Draw the final values on the grid image (config D's own overlay).
-    o circle = final value (filled dot inside = value taken from the pixels), + cross = pixel (C) point.
-    Every series is drawn in ITS OWN colour (legend swatch / plot colour), so a swapped series is
-    visible at once; the series list is written in a white band ABOVE the figure.
+                      cal: Dict[str, Any]) -> str:
+    """Draw what the VLM READ on the grid image (config D's own overlay).
     original pixel -> grid-image pixel:  p * grid['scale'] + grid['offset']"""
-    base_im = Image.open(grid_path).convert("RGB")
+    im = Image.open(grid_path).convert("RGB")
+    d = ImageDraw.Draw(im)
     k = float(grid.get("scale", 1.0))
     ox, oy = grid.get("offset", (0, 0))
-    font = _font(max(12, int(base_im.height / 60)))
-    n = max(1, len(answers))
-    band = 8 + 18 * n
-    im = Image.new("RGB", (base_im.width, base_im.height + band), "white")
-    im.paste(base_im, (0, band))
-    oy += band
-    d = ImageDraw.Draw(im)
     x_map, y_map = cal.get("x_map"), cal["y_map"]
     cats = {str(l).strip().lower(): p for p, l in cal.get("x_cat", [])}
+    font = _font(max(12, int(im.height / 60)))
     cp = sorted(cats.values())
     step = float(np.median(np.diff(cp))) if len(cp) > 1 else 0.0
-    colour_of = {s.get("name"): s.get("color", "") for s in (stage1 or {}).get("series", [])}
-    n_bar_series = sum(1 for name in answers if name not in (bar_px or {}))
-
-    def col_for(i, name):
-        c = (series_rgb or {}).get(name)
-        if c is None:
-            c = name_to_rgb(str(colour_of.get(name, "")))
-        if c is None:
-            return _PALETTE[i % len(_PALETTE)]
-        c = tuple(int(v) for v in c)
-        if min(c) > 200:                                   # too pale to see: darken
-            c = tuple(int(v * 0.6) for v in c)
-        return c
-
-    def to_px(name, x, slot_dx):
-        if (bar_px or {}).get(name) and str(x) in bar_px[name]:
-            return bar_px[name][str(x)]
-        if isinstance(x, (int, float)) and x_map is not None:
-            return x_map.pixel(float(x))
-        p = cats.get(str(x).strip().lower())
-        return None if p is None else p + slot_dx
-
-    # excluded regions (legend / inset): no grid and no pixel points there -> dashed orange box
-    for info in cal.get("exclude_info", []) or [{"what": "excluded", "source": "", "box": b}
-                                                 for b in cal.get("exclude", [])]:
-        bx = info["box"]
-        x1, y1, x2, y2 = [v * k for v in bx]
-        x1, x2, y1, y2 = x1 + ox, x2 + ox, y1 + oy, y2 + oy
-        for a, b in (((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)), ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))):
-            L = max(1.0, math.hypot(b[0] - a[0], b[1] - a[1]))
-            for t0 in np.arange(0, L, 12):
-                t1 = min(L, t0 + 7)
-                d.line([a[0] + (b[0] - a[0]) * t0 / L, a[1] + (b[1] - a[1]) * t0 / L,
-                        a[0] + (b[0] - a[0]) * t1 / L, a[1] + (b[1] - a[1]) * t1 / L], fill=(255, 140, 0), width=2)
-        lab = f"excluded: {info['what']}" + (f" ({info['source']})" if info.get("source") else "")
-        d.text((x1 + 3, max(oy, y1 - 16)), lab, fill=(230, 110, 0), font=font)
+    n = max(1, len(answers))
     for i, (name, pts) in enumerate(answers.items()):
-        dx = (i - (n - 1) / 2) * (0.8 * step / n) if n_bar_series > 1 else 0.0  # grouped bars only
-        col = col_for(i, name)
-        src = (sources or {}).get(name, [])
-        d.text((8, 4 + 18 * i), f"o {name}  ({sum(s == 'pixel' for s in src)}/{len(pts)} from pixels)",
-               fill=col, font=font)
-        for x, y in (pixel or {}).get(name, []) if isinstance((pixel or {}).get(name), list) else []:
-            px_ = to_px(name, x, dx)
-            if px_ is None or not isinstance(y, (int, float)):
-                continue
-            try:
-                gx, gy = px_ * k + ox, y_map.pixel(float(y)) * k + oy
-            except Exception:
-                continue
-            d.line([gx - 6, gy, gx + 6, gy], fill=col, width=2)
-            d.line([gx, gy - 6, gx, gy + 6], fill=col, width=2)
-        for j, (x, y) in enumerate(pts):
+        dx = (i - (n - 1) / 2) * (0.8 * step / n)          # grouped bars: one slot per series
+        col = _PALETTE[i % len(_PALETTE)]
+        d.text((8, 8 + 16 * i), f"o {name}", fill=col, font=font)
+        for x, y in pts:
             if not isinstance(y, (int, float)):
                 continue
-            px_ = to_px(name, x, dx)
-            if px_ is None:
+            if isinstance(x, (int, float)) and x_map is not None:
+                px = x_map.pixel(float(x))
+            else:
+                px = cats.get(str(x).strip().lower())
+                px = None if px is None else px + dx
+            if px is None:
                 continue
             try:
                 py = y_map.pixel(float(y))
             except Exception:
                 continue
-            gx, gy = px_ * k + ox, py * k + oy
-            d.ellipse([gx - 7, gy - 7, gx + 7, gy + 7], outline=col, width=3)
-            if j < len(src) and src[j] == "pixel":
-                d.ellipse([gx - 2, gy - 2, gx + 2, gy + 2], fill=col)
-            d.text((gx + 9, gy - 18), f"{y:.4g}", fill=col, font=font)
+            gx, gy = px * k + ox, py * k + oy
+            d.ellipse([gx - 6, gy - 6, gx + 6, gy + 6], outline=col, width=3)
+            d.text((gx + 8, gy - 18), f"{y:g}", fill=col, font=font)
     im.save(out_path)
     return out_path
 
@@ -3006,449 +1361,3 @@ def compare_series(a: Dict[str, List], b: Dict[str, Any], y_map=None, x_tol: flo
                     break
         rep[name] = {"paired": len(errs), "mean_err_frac": round(float(np.mean(errs)), 4) if errs else None}
     return rep
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. ROBUSTNESS - fusion, x snapping, insets, tables, legend fix, dark markers
-# ═══════════════════════════════════════════════════════════════════════════
-def _jsonable(o):
-    if isinstance(o, dict):
-        return {str(k): _jsonable(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_jsonable(v) for v in o]
-    if isinstance(o, (np.floating, np.integer)):
-        return o.item()
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    if isinstance(o, (str, int, float, bool)) or o is None:
-        return o
-    return str(o)
-
-
-def _x_tol(data_x: Sequence[float]) -> float:
-    xs = sorted(set(float(v) for v in data_x))
-    if len(xs) >= 2:
-        return 0.45 * float(np.min(np.diff(xs)))
-    return 0.05 * max(1.0, abs(xs[0])) if xs else 0.0
-
-
-def snap_x_to_guides(pts: List[List[Any]], data_x: Sequence[float], drop_far: bool = True) -> List[List[Any]]:
-    """Numeric x answers -> the nearest data x (dashed guide). Points farther than ~half the
-    guide spacing are dropped (invented x values such as 15, 30, 45 when the data are at 14, 28, 35).
-    drop_far=False (guides from dark markers, which can miss a position): far points are kept as read."""
-    if not data_x:
-        return pts
-    tol = _x_tol(data_x)
-    xs = np.asarray(sorted(set(float(v) for v in data_x)))
-    out, used = [], set()
-    for x, y in pts:
-        if not isinstance(x, (int, float)):
-            continue
-        j = int(np.argmin(np.abs(xs - x)))
-        if abs(xs[j] - x) <= tol and j not in used:
-            used.add(j)
-            out.append([float(xs[j]), y])
-        elif not drop_far and abs(xs[j] - x) > tol:
-            out.append([float(x), y])
-    return sorted(out, key=lambda p: p[0])
-
-
-def bars_to_categories(pts: List[List[Any]], bar_labels: Sequence[Any]) -> List[List[Any]]:
-    """'#3 | 12.5' / '3 | 12.5' -> [category of bar 3, 12.5]."""
-    out, used = [], set()
-    for x, y in pts:
-        m = re.search(r"\d+", str(x))
-        if not m:
-            continue
-        j = int(m.group()) - 1
-        if 0 <= j < len(bar_labels) and j not in used:
-            used.add(j)
-            out.append([bar_labels[j], y])
-    return out
-
-
-def match_categories(pts: List[List[Any]], cats: Sequence[str], extra: Sequence[str] = ()) -> List[List[Any]]:
-    """VLM category names -> the axis category names.
-    1) exact (case-insensitive) matches first - against the calibrated axis categories AND the
-       stage-1 x ticks (OCR can miss a label: 'HSLN' was then fuzzily turned into 'Conj-HSLN');
-    2) then a close spelling match (ratio >= 0.8) to a category that no other answer uses;
-    3) otherwise the VLM's label is KEPT as written - never moved onto a different category."""
-    allc, seen = [], set()
-    for c in list(cats) + list(extra):
-        k = str(c).strip().lower()
-        if k and k not in seen:
-            seen.add(k)
-            allc.append(str(c))
-    if not allc:
-        return pts
-    low = [c.strip().lower() for c in allc]
-    keys = [str(x).strip().lower() for x, _ in pts]
-    used = {k for k in keys if k in low}
-    out = []
-    for (x, y), k in zip(pts, keys):
-        if k in low:
-            out.append([allc[low.index(k)], y])
-            continue
-        free = [c for c in low if c not in used]
-        m = difflib.get_close_matches(k, free, n=1, cutoff=0.8)
-        if m:
-            used.add(m[0])
-            out.append([allc[low.index(m[0])], y])
-        else:
-            out.append([x, y])
-    return out
-
-
-def fuse_with_pixels(vlm_pts: List[List[Any]], pixel_pts: Any, grid: Dict[str, Any],
-                     x_map=None, data_x: Sequence[float] = ()) -> Tuple[List[List[Any]], List[str]]:
-    """Final points of one series. The VLM decides WHICH points exist (it sees the series);
-    for each VLM point, the pixel point at the same x is taken when its y is within one
-    minor grid step (log axes: within a factor 1.3) -> precise, not snapped to a grid line.
-    Otherwise the VLM value is kept (source 'vlm' = worth a look)."""
-    if not isinstance(pixel_pts, list) or not pixel_pts:
-        return [list(p) for p in vlm_pts], ["vlm"] * len(vlm_pts)
-    log = bool(grid.get("y_log"))
-    y_tol = float(grid.get("y_minor") or 0) * 1.0
-    numeric = [p[0] for p in vlm_pts + pixel_pts if isinstance(p[0], (int, float))]
-    x_tol = _x_tol(data_x) if data_x else (0.02 * (max(numeric) - min(numeric)) if len(numeric) > 1 else 0.0)
-    out, src, used = [], [], set()
-    for x, y in vlm_pts:
-        best, best_d = None, None
-        for j, (xp, yp) in enumerate(pixel_pts):
-            if j in used or not isinstance(yp, (int, float)) or not isinstance(y, (int, float)):
-                continue
-            if isinstance(x, (int, float)) and isinstance(xp, (int, float)):
-                same = abs(x - xp) <= max(x_tol, 1e-9)
-            else:
-                same = str(x).strip().lower() == str(xp).strip().lower()
-            if not same:
-                continue
-            if log:
-                ok = y > 0 and yp > 0 and max(y, yp) / min(y, yp) <= 1.3
-                dist = abs(math.log10(yp) - math.log10(y)) if ok else None
-            else:
-                dist = abs(yp - y)
-                ok = y_tol > 0 and dist <= y_tol
-            if ok and (best_d is None or dist < best_d):
-                best, best_d = j, dist
-        if best is not None:
-            used.add(best)
-            out.append([x, round(float(pixel_pts[best][1]), 4)])
-            src.append("pixel")
-        else:
-            out.append([x, y])
-            src.append("vlm")
-    return out, src
-
-
-def looks_like_table(tokens: List[Token], min_rows: int = 3, min_cols: int = 3) -> bool:
-    """A table, not a chart: at least `min_rows` text rows that each hold >= `min_cols` numbers,
-    with the numbers stacked in >= `min_cols` columns. (A chart has ONE row of x tick numbers
-    and ONE column of y tick numbers.)"""
-    nums = [t for t in tokens or [] if t.num is not None]
-    if len(nums) < min_rows * min_cols:
-        return False
-    h = float(np.median([t.h for t in nums])) or 8.0
-    rows = [r for r in _cluster([t.cy for t in nums], tol=0.5 * h) if len(r) >= min_cols]
-    if len(rows) < min_rows:
-        return False
-    in_rows = [nums[i] for r in rows for i in r]
-    cols = [c for c in _cluster([t.cx for t in in_rows], tol=1.5 * h) if len(c) >= min_rows]
-    return len(cols) >= min_cols
-
-
-def is_table_image(image_path: str, backend: str = "auto") -> bool:
-    """For the selection step (image2datanano --mode select): True when the OCR text is a table."""
-    try:
-        return looks_like_table(ocr_tokens(image_path, backend=backend))
-    except Exception:
-        return False
-
-
-def inset_box_from_tokens(tokens: List[Token], box: Box, main_x: Sequence[Tuple[float, float, str]],
-                          main_y: Sequence[Tuple[float, float, str]]) -> Optional[Box]:
-    """Inset plot = a SECOND set of axes inside the plot box: a column of numbers that read as a
-    y axis (values fall downwards) and, below it, a row of numbers that read as an x axis.
-    Returns the inset box (ORIGINAL pixels) or None. Exact, no VLM call."""
-    if not tokens:
-        return None
-    bx1, by1, bx2, by2 = box
-    main = [(a, b) for a, b, _ in list(main_x) + list(main_y)]
-    nums = [t for t in tokens if t.num is not None
-            and bx1 + 2 <= t.cx <= bx2 - 2 and by1 + 2 <= t.cy <= by2 - 2
-            and not any(abs(t.cx - a) < 4 and abs(t.cy - b) < 4 for a, b in main)]
-    if len(nums) < 4:
-        return None
-    h = float(np.median([t.h for t in nums])) or 8.0
-    cols = _cluster([t.x2 for t in nums], tol=max(4.0, 0.7 * h))
-    rows = _cluster([t.cy for t in nums], tol=0.5 * h)
-    best, best_area = None, 0.0
-    for c in cols:
-        ycol, _, _ = _consistent_numeric([nums[i] for i in c], "y")
-        if len(ycol) < 2:
-            continue
-        for r in rows:
-            xrow, _, _ = _consistent_numeric([nums[i] for i in r], "x")
-            if len(xrow) < 2:
-                continue
-            # the x labels sit below the y labels and start near the y column's right edge
-            if min(t.cy for t in xrow) < max(t.cy for t in ycol) - 0.5 * h:
-                continue
-            if min(t.cy for t in xrow) - max(t.cy for t in ycol) > 4 * h:
-                continue
-            if min(t.x1 for t in xrow) < min(t.x1 for t in ycol) - 2 * h:
-                continue
-            if min(t.x1 for t in xrow) - max(t.x2 for t in ycol) > 4 * h:
-                continue
-            ib = (min(t.x1 for t in ycol) - 0.5 * h, min(t.y1 for t in ycol) - 0.8 * h,
-                  max(t.x2 for t in xrow) + 1.0 * h, max(t.y2 for t in xrow) + 0.5 * h)
-            area = (ib[2] - ib[0]) * (ib[3] - ib[1])
-            # an "inset" covering most of the plot is the main plot itself
-            if area > 0.7 * (bx2 - bx1) * (by2 - by1):
-                continue
-            if area > best_area:
-                best, best_area = ib, area
-    return best
-
-
-def _norm_txt(t) -> str:
-    return re.sub(r"\s+", "", str(t)).lower()
-
-
-def fix_series_from_legend(stage1: dict, tokens: List[Token], arr: np.ndarray,
-                           ok_ratio: float = 0.75, rename_ratio: float = 0.45) -> Tuple[dict, Dict[str, Any]]:
-    """Correct stage-1 series with the OCR'd legend.
-    The legend = texts with a COLOURED symbol on their left, aligned in one column with the
-    texts that already match stage-1 names. Then
-      * a stage-1 name without an OCR match that resembles a legend text is renamed to it
-        ('Thymus' -> 'Thyroid');
-      * a legend text that no stage-1 series uses is added as a new series (colour = its
-        symbol, marker/line copied from the other series) - stage 1 forgot it.
-    Returns (new stage1, {"renamed": {old: new}, "added": [names]})."""
-    s1 = copy.deepcopy(stage1)
-    series = [s for s in s1.get("series", []) or [] if isinstance(s, dict)]
-    report: Dict[str, Any] = {"renamed": {}, "added": []}
-    if len(series) < 2 or not tokens:
-        return s1, report
-    words = [t for t in tokens if t.num is None and re.search(r"[A-Za-z]", t.text)]
-
-    def best_tok(name):
-        c = [(difflib.SequenceMatcher(None, _norm_txt(t.text), _norm_txt(name)).ratio(), t) for t in words]
-        return max(c, key=lambda x: x[0]) if c else (0.0, None)
-
-    anchored = {}                                       # series index -> token
-    for i, s in enumerate(series):
-        r, t = best_tok(s.get("name", ""))
-        if t is not None and r >= ok_ratio:
-            sw = _swatch(arr, t, s.get("name", ""))
-            if sw and sw["kind"] == "chromatic":
-                anchored[i] = t
-    if len(anchored) < 2:
-        return s1, report                                # legend not located: change nothing
-    at = list(anchored.values())
-    h = float(np.median([t.h for t in at]))
-    x1med = float(np.median([t.x1 for t in at]))
-    cys = sorted(t.cy for t in at)
-    step = float(np.median(np.diff(cys))) if len(cys) > 1 else 2 * h
-    lo, hi = cys[0] - 1.5 * step, cys[-1] + 1.5 * step
-    used = {id(t) for t in at}
-    cands = []
-    changed = True
-    while changed:                                       # the legend column may extend row by row
-        changed = False
-        for t in words:
-            if id(t) in used or abs(t.x1 - x1med) > 1.0 * h or not (lo <= t.cy <= hi):
-                continue
-            sw = _swatch(arr, t)
-            if not sw or sw["kind"] != "chromatic":
-                continue
-            used.add(id(t))
-            cands.append((t, sw))
-            lo, hi = min(lo, t.cy - 1.5 * step), max(hi, t.cy + 1.5 * step)
-            changed = True
-    if not cands:
-        return s1, report
-    cands.sort(key=lambda c: c[0].cy)
-    unmatched = [i for i in range(len(series)) if i not in anchored]
-    # rename: best pairs first
-    pairs = sorted(((difflib.SequenceMatcher(None, _norm_txt(t.text), _norm_txt(series[i].get("name", ""))).ratio(), i, k)
-                    for i in unmatched for k, (t, _) in enumerate(cands)), reverse=True)
-    taken_i, taken_k = set(), set()
-    for r, i, k in pairs:
-        if r < rename_ratio or i in taken_i or k in taken_k:
-            continue
-        old, new = series[i].get("name", ""), cands[k][0].text.strip()
-        series[i]["name_vlm"] = old
-        series[i]["name"] = new
-        report["renamed"][old] = new
-        taken_i.add(i)
-        taken_k.add(k)
-    ref = series[next(iter(anchored))]
-    for k, (t, sw) in enumerate(cands):
-        if k in taken_k:
-            continue
-        name = t.text.strip()
-        if any(_norm_txt(s.get("name", "")) == _norm_txt(name) for s in series):
-            continue
-        series.append({"name": name, "color": sw["hex"], "marker": ref.get("marker", "none"),
-                       "line": ref.get("line", "none"), "added_from_legend": True})
-        report["added"].append(name)
-    s1["series"] = series
-    return s1, report
-
-
-def dark_marker_columns(image_path: str, box: Box, exclude: Sequence[Box] = (), dark: int = 110,
-                        min_size: int = 5, max_size: int = 40, tol: float = 8.0) -> List[float]:
-    """x pixel positions of the markers of black/gray charts (no colour to find them by).
-    Dark blobs of marker size and roughly square shape inside the plot (long lines - axes,
-    connecting lines, error bars - removed first); blobs at the same x are merged.
-    Returns [] when the result does not look like a set of data positions."""
-    gray = np.asarray(Image.open(image_path).convert("L")).astype(int)
-    region = _region_mask(gray.shape, box, exclude)
-    d = (gray < dark) & region
-    bh = max(10, int((box[3] - box[1]) * 0.35))
-    bw = max(25, int((box[2] - box[0]) * 0.5))          # only frames / axes / gridlines: a shorter
-    long_h = ndimage.binary_opening(d, structure=np.ones((1, bw)))   # cut would open marker outlines
-    long_v = ndimage.binary_opening(d, structure=np.ones((bh, 1)))
-    d &= ~(long_h | long_v)
-    # open markers (circle / triangle outlines) become solid; then thin lines (connecting lines,
-    # error-bar stems, 1-3 px) disappear in an opening while the markers survive
-    filled = ndimage.binary_fill_holes(d)
-    solid = ndimage.binary_opening(filled, structure=np.ones((4, 4)))
-    lab, n = ndimage.label(solid)
-    xs = []
-    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
-        if sl is None:
-            continue
-        hh, ww = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
-        if not (min_size <= hh <= max_size and min_size <= ww):
-            continue
-        if ww <= max_size and 0.3 <= ww / hh <= 3.0:      # one marker (or two stacked: tall blob)
-            xs.append((sl[1].start + sl[1].stop - 1) / 2.0)
-            continue
-        # wide blob = markers of several series glued by their lines: split at the tall columns
-        prof = (lab[sl] == i).sum(0).astype(float)
-        prof = ndimage.uniform_filter1d(prof, 3)
-        for a, b in _runs(prof >= 0.75 * prof.max(), min_len=min_size // 2 + 1):
-            if b - a + 1 <= max_size:
-                xs.append(sl[1].start + (a + b) / 2.0)
-    if len(xs) < 3:
-        return []
-    xs.sort()
-    groups: List[List[float]] = [[xs[0]]]
-    for x in xs[1:]:
-        if x - groups[-1][-1] <= tol:
-            groups[-1].append(x)
-        else:
-            groups.append([x])
-    cols = [float(np.mean(g)) for g in groups]
-    return cols if 3 <= len(cols) <= 40 else []
-
-
-def choose_series_colors(series: List[Dict[str, Any]], palette: List[Tuple[np.ndarray, int]],
-                         legend_max_de: float = 15.0) -> None:
-    """Which colour describes each series (in place)? The VLM's colour (hex or name) is the default.
-    The legend swatch read from the pixels replaces it ONLY when that swatch colour is really drawn
-    in the plot (Delta E <= legend_max_de to a plot colour): a swatch read next to the wrong text
-    (an x label, a border) is then ignored. Sets s["color"], keeps s["color_vlm"], s["color_source"]."""
-    pal = [c for c, _ in palette]
-    for s in series:
-        s.setdefault("color_vlm", s.get("color"))
-        leg = s.get("color_legend")
-        rgb = name_to_rgb(leg) if leg else None
-        if rgb is not None and not is_achromatic(leg) and pal and min(delta_e(rgb, c) for c in pal) <= legend_max_de:
-            s["color"], s["color_source"] = leg, "legend"
-        else:
-            s["color"], s["color_source"] = s.get("color_vlm"), "vlm"
-
-
-def complete_categories(pairs: List[Tuple[float, float, str]], ticks: Sequence[Any],
-                        max_resid: float = 0.2) -> List[Tuple[float, float, str]]:
-    """OCR found only some category labels: place the missing stage-1 categories by their index.
-    Category centres are evenly spaced, so position = a * index + b is fitted on the labels that
-    were found (exact stage-1 spelling, in the right order); used only if that fit is good."""
-    cats = [str(t) for t in ticks or [] if t not in (None, "", "UNKNOWN")]
-    if len(cats) < 3 or len(pairs) < 2 or len(pairs) >= len(cats):
-        return pairs
-    low = [c.strip().lower() for c in cats]
-    idx = []
-    for cx, cy, t in pairs:
-        k = str(t).strip().lower()
-        if k not in low:
-            return pairs
-        idx.append(low.index(k))
-    if len(set(idx)) != len(idx) or idx != sorted(idx):
-        return pairs
-    xs = np.array([p[0] for p in pairs], float)
-    a, b = np.polyfit(np.array(idx, float), xs, 1)
-    if a <= 0 or np.max(np.abs(a * np.array(idx) + b - xs)) > max_resid * a:
-        return pairs
-    cy = float(np.median([p[1] for p in pairs]))
-    out = list(pairs)
-    for i, c in enumerate(cats):
-        if i not in idx:
-            out.append((float(a * i + b), cy, c))
-    print(f"  [GraphGrounder] categories added by position: {[c for i, c in enumerate(cats) if i not in idx]}")
-    return sorted(out, key=lambda p: p[0])
-
-
-def series_file_tags(names: Sequence[str], max_len: int = 40) -> List[str]:
-    """Series name -> safe file-name part ('Conj-HSLN' -> 'Conj-HSLN', '% ID/g' -> 'ID_g').
-    Two series that give the same tag get _2, _3 ...; an empty tag becomes s<index>."""
-    out, seen = [], {}
-    for i, n in enumerate(names):
-        t = re.sub(r"[^A-Za-z0-9.+-]+", "_", str(n)).strip("._")[:max_len] or f"s{i}"
-        if t.lower() in ("read", "raw"):                   # would clash with <base>_grid_read.png
-            t = f"series_{t}"
-        k = t.lower()
-        seen[k] = seen.get(k, 0) + 1
-        out.append(t if seen[k] == 1 else f"{t}_{seen[k]}")
-    return out
-
-
-def is_grayscale_image(image_path: str, box: Optional[Box] = None, exclude: Sequence[Box] = (),
-                       min_chroma: int = 40, max_frac: float = 0.002) -> bool:
-    """Black/white chart: (almost) no coloured pixel in the plot area (whole image if the plot box
-    is unknown). Coloured = channel spread >= min_chroma; JPEG noise and anti-aliasing stay below."""
-    arr = np.asarray(Image.open(image_path).convert("RGB")).astype(int)
-    h, w = arr.shape[:2]
-    region = _region_mask(arr.shape, box or (0, 0, w, h), exclude)
-    px = arr[region]
-    if len(px) == 0:
-        return False
-    return float(((px.max(1) - px.min(1)) >= min_chroma).mean()) < max_frac
-
-
-def note_image(list_path: str, image_name: str) -> None:
-    """Add an image name to a text list (one name per line, no duplicates)."""
-    try:
-        have = set()
-        if os.path.exists(list_path):
-            with open(list_path, encoding="utf-8") as f:
-                have = {l.strip() for l in f if l.strip()}
-        if image_name not in have:
-            os.makedirs(os.path.dirname(os.path.abspath(list_path)), exist_ok=True)
-            with open(list_path, "a", encoding="utf-8") as f:
-                f.write(image_name + "\n")
-    except OSError as e:
-        print(f"  [grid_extract] could not write {list_path}: {e}")
-
-
-def save_stage1(out_dir: str, image_path: str, stage1_vlm: Any, stage1_used: Any,
-                stage1_raw: Optional[str] = None) -> Optional[str]:
-    """<base>_stage1.json: the stage-1 result as the VLM gave it ("vlm"), the version the
-    extraction really used ("used": normalised names/units, legend fixes, colours chosen from the
-    plot - see color_vlm / color_legend / color_source per series) and, if given, the raw VLM text."""
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        base = os.path.splitext(os.path.basename(image_path))[0]
-        path = os.path.join(out_dir, f"{base}_stage1.json")
-        data = {"image": os.path.basename(image_path), "vlm": stage1_vlm, "used": stage1_used}
-        if stage1_raw is not None:
-            data["raw_text"] = stage1_raw
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(_jsonable(data), f, indent=2, ensure_ascii=False)
-        return path
-    except Exception as e:                                  # debug output must never break the run
-        print(f"  [grid_extract] stage 1 not saved: {type(e).__name__}: {e}")
-        return None
