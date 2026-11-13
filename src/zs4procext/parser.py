@@ -12,7 +12,6 @@ from trieregex import TrieRegEx as TRE
 import pandas as pd
 import os 
 
-
 class Amount(BaseModel):
     value: List[str] = []
     repetitions: List[int] = []
@@ -54,7 +53,7 @@ class Parameters(BaseModel):
 class ParametersParser(BaseModel):
     parser_params_path: str = str(
         importlib_resources.files("zs4procext")
-        / "resources"
+        / "resources/parsing_parameters"
         / "synthesis_parsing_parameters.json"
     )
     time: bool = True
@@ -315,7 +314,7 @@ class ParametersParser(BaseModel):
 class ListParametersParser(BaseModel):
     parser_params_path: str = str(
         importlib_resources.files("zs4procext")
-        / "resources"
+        / "resources/parsing_parameters"
         / "synthesis_parsing_parameters.json"
     )
     quantity_range: int = 100
@@ -583,7 +582,7 @@ class ListParametersParser(BaseModel):
 class ComplexParametersParser(BaseModel):
     parser_params_path: str = str(
         importlib_resources.files("zs4procext")
-        / "resources"
+        / "resources/parsing_parameters"
         / "synthesis_parsing_parameters.json"
     )
     _regex: Optional[re.Pattern[str]] = PrivateAttr(default=None)
@@ -707,6 +706,7 @@ class ActionsParser(BaseModel):
 class KeywordSearching(BaseModel):
     keywords_list: List[str]
     limit_words: bool = True
+    word_type: str = "normal"
     _regex: Optional[re.Pattern[str]] = PrivateAttr(default=None)
 
     @validator("keywords_list")
@@ -720,7 +720,9 @@ class KeywordSearching(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         """initialize the parser object by compiling a regex code"""
         tre_regex: re.Pattern[str] = correct_tre(self.keywords_list)
-        if self.limit_words is False:
+        if self.word_type == "units":
+             self._regex = re.compile(f"(?<![a-zA-Z]){tre_regex}(?![a-zA-Z])", re.IGNORECASE | re.MULTILINE)
+        elif self.limit_words is False:
             self._regex = re.compile(f"{tre_regex}", re.IGNORECASE | re.MULTILINE)
         else:
             self._regex = re.compile(f"\\b{tre_regex}\\b", re.IGNORECASE | re.MULTILINE)
@@ -770,7 +772,7 @@ class SchemaParser(BaseModel):
         for atribute in self.atributes_list:
             self._atributes_regex[atribute] = re.compile(
                 #rf"[\"']*{atribute}[\"']*\s*[:=-]\s*[\"']*([^\"'{self.limiters['initial']}{self.limiters['final']}]*)[\"']*,*",
-                rf"[\"']*{atribute}[\"']*\s*[:=-]\s*[\"',]*([^\"',]*)[\"']*",
+                rf"[\"']*{atribute}[\"']*\s*[:=-]\s*[\"']*([^\"']*)[\"']*",
                 re.IGNORECASE | re.MULTILINE,
             )
 
@@ -819,8 +821,15 @@ class SchemaParser(BaseModel):
                 f"The give atribute is not valid, the valid atributes are {self.atributes_list}"
             )
         regex: re.Pattern[str] = self._atributes_regex[atribute]
-        result: List[Any] = regex.findall(text)
-        return result
+        results: List[Any] = regex.findall(text)
+        i = 0
+        for result in results:
+            while result[-1] in set([",", " "]):
+                result = result[:-1]
+                print(result)
+            results[i] = result
+            i += 1
+        return results
 
 
 class DimensionlessParser:
@@ -956,9 +965,10 @@ class TableParser(BaseModel):
     table_type: str = "materials_characterization"
     _words_registry: Optional[Dict[str, Any]] = PrivateAttr(default=None)
     _word_searcher: Optional[Dict[str, KeywordSearching]] = PrivateAttr(default={})
-    _unit_searcher: Optional[Dict[str, KeywordSearching]] = PrivateAttr(default={})
+    _unit_searcher: Optional[KeywordSearching] = PrivateAttr(default={})
+    _unique_set: set = set()
 
-    def model_post_init(self, __context: Any):
+    """def model_post_init(self, __context: Any):
         if self.table_type == "materials_characterization":
             self._words_registry = MATERIALS_CHARACTERIZATION_REGISTRY
         if self._words_registry is None:
@@ -968,13 +978,32 @@ class TableParser(BaseModel):
             if self._words_registry[key]["units"] != []:
                 self._unit_searcher[key] = KeywordSearching(keywords_list=self._words_registry[key]["units"])
             else:
-                self._unit_searcher[key] = KeywordSearching(keywords_list=["#%/daopdj21387921"])
-
+                self._unit_searcher[key] = KeywordSearching(keywords_list=["#%/daopdj21387921"])"""
+    
+    def model_post_init(self, __context: Any):
+        if self.table_type == "materials_characterization":
+            self._words_registry = MATERIALS_CHARACTERIZATION_REGISTRY
+        if self._words_registry is None:
+            raise AttributeError(f"{self.table_type} is not a valid table_type")
+        unit_list: List[str] = []
+        regex_pattern: str = ""
+        unique_variables = []
+        for key in self._words_registry.keys():
+            self._word_searcher[key] = KeywordSearching(keywords_list=self._words_registry[key]["words"], limit_words=self._words_registry[key]["limit_words"])
+            if self._words_registry[key]["unique"]:
+                unique_variables.append(key)
+            for unit in self._words_registry[key]["units"]:
+                if unit not in unit_list:
+                    unit_list.append(unit)
+        print(self._word_searcher)
+        self._unique_set = set(unique_variables)
+        self._unit_searcher = KeywordSearching(keywords_list=unit_list, word_type="units")
+    
     def update_result(self, results: List[Dict[str, Any]], table_entries: List[List[str]], indexes_to_ignore: List[int], units: List[str], key: str, index: int):
         if len(units) > 0:
             unit: str = f" {units[0]}"
         else:
-            unit = ""
+            unit = " empty"
         j = 0
         line_index = 0
         for line in table_entries:
@@ -990,12 +1019,20 @@ class TableParser(BaseModel):
                 entry = line[index]
                 try:
                     test = results[j]
-                    new_entry =  entry + unit
+                    new_entry =  entry.strip() + unit
                 except IndexError:
                     results.append({})
-                    new_entry = entry + unit
-                if key in results[j].keys():
-                    results[j][key].append(new_entry)
+                    new_entry = entry.strip() + unit
+                new_entry = new_entry.replace(" empty", "")
+                if entry.strip() in EMPTY_VALUES_REGISTRY:
+                    pass
+                elif unit[1:] not in self._words_registry[key]["units"]:
+                    pass
+                elif key in results[j].keys():
+                    if key in self._unique_set and len(results[j][key]) > 0:
+                        pass
+                    else:
+                        results[j][key].append(new_entry)
                 else:
                     results[j][key] = [new_entry]
                 j += 1
@@ -1008,16 +1045,36 @@ class TableParser(BaseModel):
         headers: List[str] = []
         for i in range(len(table_entries[0])):
             header_string = ""
+            previous_index = -1
             for index in collumn_headers:
-                header_string += table_entries[index][i]
-            headers.append(header_string.replace(" ", ""))
+                if index > previous_index + 1:
+                    break
+                header_string += " " + table_entries[index][i].strip()
+                previous_index = index
+            headers.append(header_string)
         keys_to_use = list(self._words_registry.keys())
         i = 0
         for header in headers:
+            units = self._unit_searcher.find_keywords(header.lower())
+            corrected_header = header.replace(",", "")
+            corrected_header = corrected_header.replace("(", "")
+            corrected_header = corrected_header.replace(")", "")
+            corrected_header = corrected_header.replace("[", "")
+            corrected_header = corrected_header.replace("]", "")
+            corrected_header = corrected_header.replace("  ", " ")
+            if len(units) > 0:
+                corrected_header = corrected_header.replace(units[0], "")
+                corrected_header = corrected_header.replace("  ", " ")
+            print(corrected_header.lower())
+            print(units)
+            if corrected_header == " ":
+                key = "sample"
+                print(key)
+                results = self.update_result(results, table_entries, collumn_headers, units, key, i)
             for key in keys_to_use:
-                keywords = self._word_searcher[key].find_keywords(header)
-                if len(keywords) > 0:
-                    units = self._unit_searcher[key].find_keywords(header)
+                words_found: List[str] = self._word_searcher[key].find_keywords(corrected_header.lower())
+                if len(words_found) > 0:
+                    print(key)
                     results = self.update_result(results, table_entries, collumn_headers, units, key, i)
                     break
             i += 1
@@ -1161,117 +1218,258 @@ TYPE_COMPARISSON_REGISTRY: Dict[str, str] = {
 }
 
 MATERIALS_CHARACTERIZATION_REGISTRY: Dict[str, Any] = {
-    "sample": {"words": ["sample", "catalyst"], "units": []},
-    "surface_area": {"words": ["sbet"], "units": ["m2/g", "m2/g", "m2g-1"]},
-    "external_area": {"words": ["sext", "smeso"], "units": ["m2/g", "m2/g", "m2g-1"]},
-    "micropore_area": {"words": ["smicro"], "units": ["m2/g", "m2/g", "m2g-1"]},
-    "micropore_volume": {"words": ["vmicro"], "units": ["cm3/g", "cm3g-1"]},
-    "mesopore_volume": {"words": ["vmeso"], "units": ["cm3/g", "cm3g-1"]},
-    "total_volume": {"words": ["vp"], "units": ["cm3/g", "cm3g-1"]},
-    "sio2/al2o_gel": {"words": ["siO2/al2o3gel", "gelsiO2/al2o3"], "units": []},
-    "sio2/al2o3": {"words": ["siO2/al2o3"], "units": []},
-    "si/al_filtrate": {"words": ["si/alfiltrate", "filtratesi/al", "Si/Alﬁltrate"], "units": []},
-    "si/al": {"words": ["si/al"], "units": []},
-    "b/l ratio": {"words": ["b/l"], "units": []},
-    "l/b ratio": {"words": ["l/b"], "units": []},
-    "naoh_c": {"words": ["naoh"], "units": ["m"]},
-    "crystallinity": {"words": ["crystallinity"], "units": ["%"]},
-    "yield": {"words": ["yield"], "units": ["%"]},
-    "Si": {"words": ["si"], "units": ["wt%"]},
-    "Al": {"words": ["al"], "units": ["wt%"]},
-    "bronsted_sites": {"words": ["b"], "units": ["μmol/g"]},
-    "lewis_sites": {"words": ["l"], "units": ["μmol/g"]},
+    "sample": {"words": ["sample", "catalyst", "zeolites", "samples", "zeolite", "material", "support"], "units": ["empty"], "limit_words": False, "unique": True},
+    "yield": {"words": ["yield"], "units": ["%", "empty"],"limit_words": False,  "unique": True},
+    "external_area": {"words": ["sext", "smes", "s mes", "Surface area Meso", "External", "area external"], "units": ["m2/g", "m2/g", "m2g-1", "m2 g-1", "m2.g-1"], "limit_words": False,  "unique": True},
+    "micropore_area": {"words": ["smic", "s mic", "bet area microporous", "area micropore"], "units": ["m2/g", "m2/g", "m2g-1", "m2 g-1", "m2.g-1"], "limit_words": False,  "unique": True},
+    "surface_area": {"words": ["sbet", "Surface area BET", "Surface area", "bet area", "area total", "stotal", "s total"], "units": ["m2/g", "m2/g", "m2g-1", "m2.g-1", "m2 g-1"], "limit_words": False,  "unique": True},
+    "micropore_volume": {"words": ["vmic", "v mic", "Pore volume Micro", "Micropore volume", "Microporous volume", "volume micro"], "units": ["cm3/g", "cm3g-1", "cm3.g-1", "cm3 g-1", "mm3/g", "mm3g-1", "mm3.g-1", "mm3 g-1", "ml/g"], "limit_words": False,  "unique": True},
+    "mesopore_volume": {"words": ["vmes", "v mes", "Pore volume Meso", "Mesopore volume", "Vext", "volume meso"], "units": ["cm3/g", "cm3g-1", "cm3.g-1", "cm3 g-1", "mm3/g", "mm3g-1", "mm3.g-1", "mm3 g-1"],"limit_words": False,  "unique": True},
+    "total_volume": {"words": ["vp", "pore volume", "vtotal", "v total", "volume total", "vt"], "units": ["cm3/g", "cm3g-1", "cm3 g-1"], "limit_words": False,  "unique": True},
+    "sio2_al2o_ratio_gel": {"words": ["sio2/al2o3 gel", "gel siO2/al2o3"], "units": ["empty"], "limit_words": False,  "unique": True},
+    "sio2_al2o3_ratio": {"words": ["sio2/al2o3"], "units": ["empty"], "limit_words": False,  "unique": True},
+    "si_al_ratio_filtrate": {"words": ["si/al filtrate", "filtrate si/al", "Si/Al ﬁltrate"], "units": ["empty"], "limit_words": False,  "unique": True},
+    "si_al_ratio": {"words": ["si/al", "Molar ratio", "si/albulk", "si/ albulk", "Si/ Al"], "units": ["empty"],"limit_words": False, "unique": True},
+    "b_l_ratio": {"words": ["b/l"], "units": ["empty"],"limit_words": False,  "unique": False},
+    "l_b_ratio": {"words": ["l/b"], "units": ["empty"], "limit_words": False,  "unique": False},
+    "time": {"words": ["time", "period", "t (min)"], "units": ["min", "h"],"limit_words": False,  "unique": True},
+    "temperature": {"words": ["t (k)", "temperature"], "units": ["k", "ºc", "°c"],"limit_words": False,  "unique": True},
+    "crystallinity": {"words": ["crystallinity", "cristallinity"], "units": ["%", "empty"], "limit_words": False,  "unique": True},
+    "Si": {"words": ["si", "nsi"], "units": ["wt%", "empty", "umol/g", "mmol/g"],"limit_words": True,  "unique": True},
+    "Al": {"words": ["al", "nal"], "units": ["wt%", "empty", "umol/g", "mmol/g", "umol.g-1"],"limit_words": True, "unique": True},
+    "lewis_sites": {"words": ["l", "nlewis", "lewis", "lpy", "pyl", "clewis", "cl"], "units": ["μmol/g", "mmol g-1", "umol/g", "umol.g-1", "mmolg-1", "lmol g-1"], "limit_words": True,  "unique": False},
+    "bronsted_sites": {"words": ["b", "nbronstead", "bronstead", "bronsted", "bpy", "pyh", "cbronsted", "cb"], "units": ["μmol/g", "mmol g-1", "umol/g", "umol.g-1","mmolg-1", "lmol g-1"], "limit_words": True, "unique": False},
+    "naoh_c": {"words": ["naoh", "concentration", "c (m)"], "units": ["m", "empty"],"limit_words": False,  "unique": True},
 }
 
-import re
-import json
-from typing import ClassVar
-from pydantic import BaseModel, Field
+EMPTY_VALUES_REGISTRY = set(["-", "-"])
+
+
+subscript_map = {
+    '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+    '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+    'ₐ': 'A', 'ₑ': 'E', 'ₕ': 'H', 'ᵢ': 'I', 'ⱼ': 'J',
+    'ₖ': 'K', 'ₗ': 'L', 'ₘ': 'M', 'ₙ': 'N', 'ₒ': 'O',
+    'ₚ': 'P', 'ᵣ': 'R', 'ₛ': 'S', 'ₜ': 'T', 'ᵤ': 'U',
+    'ᵥ': 'V', 'ₓ': 'X'
+}
+
+superscript_map = {
+    '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+    '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+    '⁺': '+', '⁻': '-', '⁼': '=', '⁽': '(', '⁾': ')',
+    'ⁿ': 'N', 'ᵃ': 'A', 'ᵇ': 'B', 'ᶜ': 'C', 'ᵈ': 'D',
+    'ᵉ': 'E', 'ᶠ': 'F', 'ᵍ': 'G', 'ʰ': 'H', 'ᶦ': 'I',
+    'ʲ': 'J', 'ᵏ': 'K', 'ˡ': 'L', 'ᵐ': 'M', 'ⁱ': 'I',
+    'ᵒ': 'O', 'ᵖ': 'P', 'ʳ': 'R', 'ˢ': 'S', 'ᵗ': 'T',
+    'ᵘ': 'U', 'ᵛ': 'V', 'ʷ': 'W', 'ˣ': 'X', 'ʸ': 'Y',
+    'ᶻ': 'Z'
+}
 
 class ImageParser(BaseModel):
-    data_dict: dict = Field(default_factory=dict)
-    catalyst_label: str = ""
-    x_axis_label: str = ""
-    y_axis_label: str = ""
-    data_string: str = ""
+    data_dict: Dict[str, Dict[str, list]] = Field(default_factory=dict)
+    data_string: str = "" 
 
-    def __init__(self, data_string: str = "", **data):
+    def __init__(self, data_string: Union[str, dict] = "", **data):
         super().__init__(data_string=data_string, **data)
-        cleaned_data_string = self._remove_square_brackets(data_string)
-        cleaned_data_string = self._remove_unicode_subscripts_superscripts(cleaned_data_string)
-        self._convert_to_dict(cleaned_data_string)
+        self._parse_input(data_string)
 
-    def _remove_square_brackets(self, data_string: str) -> str:
-        data_string = data_string.replace('_{', ' ')
-        return re.sub(r'[\[\]{}]', '', data_string).replace('_', '')
+    def _safe_json_loads(self, s: str):
+        s_stripped = s.strip()
 
-    def _remove_unicode_subscripts_superscripts(self, data: str) -> str:
-        cleaned_data = re.sub(r'\\u208', '', data)
-        cleaned_data = re.sub(r'\\u00b', '', cleaned_data)
-        cleaned_data = re.sub(r'\^', '', cleaned_data) 
-        return cleaned_data
+        # 1) Normalize keys that have extra/mixed quotes before the colon.
+        #    Examples handled: "'10 000':   or  "'key'":   or  "\"'key'\":  etc.
+        s = re.sub(r'([{\s,])\s*["\']+\s*([^"\':]+?)\s*["\']+\s*:', r'\1"\2":', s)
 
-    def _convert_to_dict(self, data_string: str, delimiter: str = ";"):
-        header_pattern = re.compile(
-            rf'^[^;\n]*[a-zA-Z]+[^;\n]*\s*{delimiter}\s*[^;\n]*[a-zA-Z]+[^;\n]*\s*{delimiter}\s*[^;\n]*[a-zA-Z]+[^;\n]*$',
-            re.MULTILINE,
-        )
-        header_match = header_pattern.search(data_string)
-        if not header_match:
-            print("No valid table header found in the input string.")
-            return
+        # 2) If it still looks like a Python-dict (single-quoted), convert to JSON double-quotes
+        if re.search(r"{\s*'", s) or re.search(r"'\w", s):
+            # convert 'some'  ->  "some"
+            s = re.sub(r"'\s*([^']*?)\s*'", r'"\1"', s)
+            # fallback: convert remaining single quotes to doubles (safe-guard)
+            s = re.sub(r'(?<!\\)\'', '"', s)
 
-        header_start = header_match.start()
-        header_line = data_string[header_start:].split('\n')[0]
-        header = [h.strip() for h in header_line.split(delimiter)]
-        if len(header) != 3:
-            print("Header does not have the expected format (Catalyst;x-axis label;y-axis label).")
-            return
+        # note: I'm not doing a global control-character replacement here because
+        # replacing newlines/tabs outside JSON strings can break parsing.
+        return json.loads(s)
 
-        self.catalyst_label = header[0]
-        self.x_axis_label = header[1]
-        self.y_axis_label = header[2]
-
-        if self.x_axis_label == self.y_axis_label:
-            print(f"Header labels for x-axis and y-axis are identical ('{self.x_axis_label}'). Temporarily renaming y-axis header.")
-            temp_y_axis_label = self.y_axis_label + "y"
+    def _parse_input(self, input_data: Union[str, dict]):
+        print("RAW INPUT DATA:", input_data)
+        if isinstance(input_data, dict):
+            input_data = self._convert_na_to_null(input_data)
+            input_data = self._clean_keys(input_data)
+            self.data_dict = self._filter_na_points(input_data)
         else:
-            temp_y_axis_label = self.y_axis_label
-
-        data_lines = data_string.strip().split('\n')
-        for line in data_lines:
-            if not line.strip() or line == header_line:
-                continue
-
-            if not re.match(rf'^[^;]+{delimiter}[^;]+{delimiter}[^;]+$', line):
-                continue
-
-            parts = [p.strip() for p in line.split(delimiter)]
-            if len(parts) != 3:
-                continue
-
-            catalyst = parts[0]
             try:
-                x_value = float(parts[1])
-                y_value = float(parts[2])
-            except ValueError:
+                input_data = input_data.strip()
+
+                # Extract content inside triple backticks
+                matches = re.findall(r"```(?:json)?(.*?)```", input_data, re.DOTALL)
+                if matches:
+                    input_data = matches[0].strip()
+
+                input_data = re.sub(r'"\{\}"', '""', input_data)
+                input_data = re.sub(r'\\u208', '', input_data)
+                input_data = re.sub(r'\\u00b', '', input_data)
+
+                input_data = re.sub(
+                    r'(?<=[:\[,])\s*(?:"N/A"|N/A|NA|NaN|nan|na)\s*(?=[,\]\}])',
+                    ' null',
+                    input_data,
+                    flags=re.IGNORECASE
+                )
+
+                parsed_data = self._safe_json_loads(input_data)
+
+                outer_key = None
+                if isinstance(parsed_data, dict) and len(parsed_data) == 1:
+                    only_key = next(iter(parsed_data))
+                    if isinstance(parsed_data[only_key], dict):
+                        outer_key = only_key
+                        parsed_data = parsed_data[only_key]
+
+                parsed_data = self._restructure_if_needed(parsed_data, outer_key=outer_key)
+                parsed_data = self._convert_na_to_null(parsed_data)
+                parsed_data = self._clean_keys(parsed_data)
+                self.data_dict = self._filter_na_points(parsed_data)
+
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing failed: {e}\nInput was:\n{input_data}")
+                self.data_dict = {}
+
+    
+    def _restructure_if_needed(self, data: dict, outer_key: str = None) -> dict:
+        if not isinstance(data, dict):
+            return data
+
+        # If outer_key is present and the inner dict has more than 3 keys → apply restructuring
+        if outer_key and isinstance(data, dict) and len(data) > 3:
+            # First key in the dict is assumed to be the x-axis
+            inner_keys = list(data.keys())
+            x_key = inner_keys[0]
+            x_values = data[x_key]
+
+            restructured = {}
+            for k in inner_keys[1:]:  # Skip x_key
+                v = data[k]
+                if isinstance(v, list) and len(v) == len(x_values):
+                    restructured[k] = {
+                        x_key: x_values,
+                        outer_key: v  # Use outer_key as y-axis label
+                    }
+
+            return restructured if restructured else data
+
+        # Otherwise: normal behavior
+        x_key = next((k for k, v in data.items() if isinstance(v, list)), None)
+        if x_key is None:
+            return data
+
+        x_values = data[x_key]
+        restructured = {}
+        for k, v in data.items():
+            if k == x_key:
+                continue
+            if isinstance(v, list) and len(v) == len(x_values):
+                series_name = outer_key if outer_key else k
+                restructured[series_name] = {
+                    x_key: x_values,
+                    k: v
+                }
+
+        return restructured if restructured else data
+
+
+    def _convert_na_to_null(self, data: Dict) -> Dict:
+        def convert_list(vals):
+            cleaned = []
+            for v in vals:
+                if isinstance(v, (int, float)):
+                    cleaned.append(v)
+                elif isinstance(v, str):
+                    stripped = v.strip().lower()
+                    if stripped in {"", "na", "n/a", "nan"}:
+                        cleaned.append(None)
+                    else:
+                        try:
+                            # Convert numeric strings to float
+                            num = float(v)
+                            cleaned.append(num)
+                        except ValueError:
+                            # Remove any non-numeric strings
+                            cleaned.append(None)
+                elif v is None:
+                    cleaned.append(None)
+                else:
+                    cleaned.append(None)  # Catch anything unexpected
+            return cleaned
+
+        converted = {}
+        for key, subdict in data.items():
+            if isinstance(subdict, dict):
+                converted_sub = {
+                    k: convert_list(vals) if isinstance(vals, list) else vals
+                    for k, vals in subdict.items()
+                }
+                converted[key] = converted_sub
+            else:
+                converted[key] = subdict
+        return converted
+
+
+    def _normalize_sub_super_scripts(self, text: str) -> str:
+        return ''.join(
+            subscript_map.get(char, superscript_map.get(char, char)) for char in text
+        )
+
+    def _clean_keys(self, data: Dict) -> Dict:
+        def clean_key(k: str) -> str:
+
+            k = re.sub(r'\{_?([^{}]+)\}', r'\1', k)
+
+            k = self._normalize_sub_super_scripts(k)
+
+            k = k.replace("_", "").strip()
+
+            return k
+
+        cleaned = {}
+        for key, value in data.items():
+            new_key = clean_key(key)
+            if isinstance(value, dict):
+                cleaned[new_key] = self._clean_keys(value)
+            else:
+                cleaned[new_key] = value
+        return cleaned
+
+    def _filter_na_points(self, data: Dict[str, Dict[str, list]]) -> Dict[str, Dict[str, list]]:
+        filtered = {}
+        for series_name, axes in data.items():
+            keys = list(axes.keys())
+            if len(keys) < 2:
                 continue
 
-            if catalyst not in self.data_dict:
-                self.data_dict[catalyst] = {self.x_axis_label: [], temp_y_axis_label: []}
+            x_key, y_key = keys[0], keys[1]
+            x_vals = axes[x_key]
+            y_vals = axes[y_key]
 
-            self.data_dict[catalyst][self.x_axis_label].append(x_value)
-            self.data_dict[catalyst][temp_y_axis_label].append(y_value)
+            if len(x_vals) != len(y_vals):
+                continue
 
-    def parse(self, data_string: str):
-        self.data_dict = {}
-        self.catalyst_label = ""
-        self.x_axis_label = ""
-        self.y_axis_label = ""
+            x_filtered, y_filtered = [], []
+            for x, y in zip(x_vals, y_vals):
+                if x is not None and y is not None:
+                    x_filtered.append(x)
+                    y_filtered.append(y)
 
-        cleaned_data_string = self._remove_square_brackets(data_string)
-        cleaned_data_string = self._remove_unicode_subscripts_superscripts(cleaned_data_string)
-        self._convert_to_dict(cleaned_data_string)
+            filtered[series_name] = {
+                x_key: x_filtered,
+                y_key: y_filtered
+            }
+
+        return filtered
+
+    def parse(self, data_string: Union[str, dict]):
+        self._parse_input(data_string)
         return self.get_data_dict()
 
     def get_data_dict(self):
@@ -1279,3 +1477,16 @@ class ImageParser(BaseModel):
 
     def to_json(self):
         return json.dumps(self.data_dict, indent=4)
+
+    def get_axis_labels(self):
+        axis_labels = {}
+        for series, axes in self.data_dict.items():
+            keys = list(axes.keys())
+            if len(keys) >= 2:
+                axis_labels[series] = {
+                    "x_axis": keys[0],
+                    "y_axis": keys[1]
+                }
+        return axis_labels
+
+

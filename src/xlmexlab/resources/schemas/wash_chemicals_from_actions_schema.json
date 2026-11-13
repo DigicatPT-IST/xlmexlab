@@ -1,0 +1,11 @@
+{
+  "expertise": "You are an expert in chemistry!",
+  "initialization": "Take your time and extract information as truthfully as possible using the provided context. If any information is not provided or you are unsure, use 'N/A'.",
+  "objective":"Get all the solvents or solutions used for washing in the following text:",
+  "definitions": {},
+  "answer_schema": {
+                    "Initialization" : "For each solvent or solution found, create a Json schema with the following format:",
+                    "Format" : "{'type': Solvent oir Solution, 'name': name of the compound, 'amount': quantity of the compound ,'concentration': Concentration of the solution, 'dropwise': True or False}"
+                  },
+  "conclusion":  "Assume 'dropwise' as False if you are unsure. The amount and concentration should always contain the units whenever possible. If there is no mention of a solvent, return nothing."
+}
