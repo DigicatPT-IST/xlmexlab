@@ -1326,48 +1326,28 @@ def _region_mask(shape, box: Box, exclude: Sequence[Box]) -> np.ndarray:
     return m
 
 
-def rgb_to_lab(rgb) -> np.ndarray:
-    """sRGB (0-255, shape (..., 3)) -> CIELAB. Distances in Lab follow what the eye sees:
-    pastel yellow vs pastel orange are far apart, a colour vs its anti-aliased edge are close."""
-    c = np.asarray(rgb, float) / 255.0
-    c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
-    m = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]])
-    xyz = c @ m.T / np.array([0.95047, 1.0, 1.08883])
-    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
-    return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1)
-
-
-def delta_e(a, b) -> float:
-    """Perceptual distance between two RGB colours (CIE76 Delta E: ~2 just visible, >25 clearly different)."""
-    return float(np.linalg.norm(rgb_to_lab(a) - rgb_to_lab(b)))
-
-
 def dominant_colors(arr: np.ndarray, box: Box, exclude: Sequence[Box] = (),
-                    min_px: int = 40, merge_de: float = 12.0, min_chroma: int = 20) -> List[Tuple[np.ndarray, int]]:
-    """Chromatic colours present in the plot area, most frequent first.
-    Bins are merged when they are perceptually close (Lab Delta E < merge_de): the old RGB
-    distance merged pastel yellow into pastel orange (Fig 56: Conj-HSLN lost its colour)
-    and the chroma cut-off of 50 dropped lavender (HSLN) entirely."""
+                    min_px: int = 40, merge_dist: float = 55.0) -> List[Tuple[np.ndarray, int]]:
+    """Chromatic colours present in the plot area, most frequent first."""
     region = _region_mask(arr.shape, box, exclude)
     px = arr[region].astype(int)
-    px = px[(px.max(1) - px.min(1)) >= min_chroma]   # skip white / gray / black, keep pastel fills
+    px = px[(px.max(1) - px.min(1)) >= 50]                     # skip white / gray / black
     if len(px) == 0:
         return []
-    q = (px // 8) * 8 + 4
+    q = (px // 16) * 16 + 8
     keys, counts = np.unique(q, axis=0, return_counts=True)
-    labs = rgb_to_lab(keys)
-    clusters: List[List] = []                                   # [seed rgb, count, seed lab]
+    clusters: List[List] = []                                   # [weighted_sum, count]
     for i in np.argsort(-counts):
         if counts[i] < 2:
             break
         c = keys[i].astype(float)
         for cl in clusters:
-            if np.linalg.norm(cl[2] - labs[i]) < merge_de:
+            if np.linalg.norm(cl[0] - c) < merge_dist:
                 cl[1] += int(counts[i])
                 break
         else:
-            clusters.append([c, int(counts[i]), labs[i]])  # seed = most frequent bin
-    clusters = [[c[0], c[1]] for c in sorted(clusters, key=lambda c: -c[1])]
+            clusters.append([c, int(counts[i])])          # seed = most frequent bin
+    clusters.sort(key=lambda c: -c[1])
     # anti-aliased edges are blends of a series colour with the white background:
     # fold every cluster that lies on the segment strong-colour -> white into it
     merged: List[List] = []
@@ -1398,68 +1378,28 @@ def _color_dist(a, b) -> float:
     return dh + 40 * abs(sa - sb) + 30 * abs(va - vb)
 
 
-def colour_match_score(ref, plot_rgb, n_px: int, max_px: int, max_hue: float = 50.0,
-                       max_de: float = 90.0) -> Optional[float]:
-    """How well a plot colour fits the colour stage 1 gave (lower = better, None = no match).
-    Mostly HUE: a VLM says 'orange' / 'blue' or a memorised hex for what is really a pastel or a
-    darker fill, so lightness is unreliable but the hue is right. Lab Delta E breaks ties between
-    colours of the same hue, and small clusters (anti-aliased bar edges, borders) are penalised so
-    the real fill wins over its own dark edge."""
-    hr, sr, _ = _hsv(ref)
-    hp, sp, _ = _hsv(plot_rgb)
-    dh = min(abs(hr - hp), 1 - abs(hr - hp)) * 360
-    de = delta_e(ref, plot_rgb)
-    if dh > max_hue or de > max_de:
-        return None
-    small = 15.0 if n_px < 0.15 * max_px else 0.0
-    return dh + 0.25 * de + small
-
-
 def assign_colors(series_names_colors: List[Tuple[str, str]],
                   palette: List[Tuple[np.ndarray, int]]) -> Dict[str, Optional[np.ndarray]]:
-    """One-to-one assignment of the stage-1 colours (VLM hex / name, or the legend swatch) to the
-    colours REALLY drawn in the plot: the best (series, plot colour) pair is fixed first
-    (colour_match_score), then the next best among what is left, so when two plot colours are
-    similar each series gets the one closest to its own colour. No acceptable plot colour -> None
-    (no pixels, no fading). Black/gray series get None (read by the VLM)."""
+    """Greedy one-to-one assignment of the colour names from stage 1 to the
+    detected plot colours (by hue). Black/gray series get None (use the VLM)."""
     out: Dict[str, Optional[np.ndarray]] = {}
     cands = []
-    big = max((n for _, n in palette), default=1)
     for name, cname in series_names_colors:
         rgb = name_to_rgb(cname)
         if rgb is None or is_achromatic(cname):
             out[name] = None
             continue
-        for j, (c, n) in enumerate(palette):
-            sc = colour_match_score(rgb, c, n, big)
-            if sc is not None:
-                cands.append((sc, name, j))
+        for j, (c, _) in enumerate(palette):
+            cands.append((_color_dist(rgb, c), name, j))
     used = set()
-    for d, name, j in sorted(cands, key=lambda t: t[0]):
-        if name in out or j in used:
+    for d, name, j in sorted(cands):
+        if name in out or j in used or d > 90:
             continue
         out[name] = palette[j][0]
         used.add(j)
     for name, _ in series_names_colors:
         out.setdefault(name, None)
     return out
-
-
-def choose_series_colors(series: List[Dict[str, Any]], palette: List[Tuple[np.ndarray, int]],
-                         legend_max_de: float = 15.0) -> None:
-    """Which colour describes each series (in place)? The VLM's colour (hex or name) is the default.
-    The legend swatch read from the pixels replaces it ONLY when that swatch colour is really drawn
-    in the plot (Delta E <= legend_max_de to a plot colour): a swatch read next to the wrong text
-    (an x label, a border) is then ignored. Sets s["color"], keeps s["color_vlm"], s["color_source"]."""
-    pal = [c for c, _ in palette]
-    for s in series:
-        s.setdefault("color_vlm", s.get("color"))
-        leg = s.get("color_legend")
-        rgb = name_to_rgb(leg) if leg else None
-        if rgb is not None and not is_achromatic(leg) and pal and min(delta_e(rgb, c) for c in pal) <= legend_max_de:
-            s["color"], s["color_source"] = leg, "legend"
-        else:
-            s["color"], s["color_source"] = s.get("color_vlm"), "vlm"
 
 
 def color_mask(arr: np.ndarray, rgb: np.ndarray, region: np.ndarray, tol: float = 70.0,
@@ -1469,7 +1409,7 @@ def color_mask(arr: np.ndarray, rgb: np.ndarray, region: np.ndarray, tol: float 
     neighbouring hues (red vs orange) without a tight tolerance."""
     a = arr.astype(float)
     d = np.linalg.norm(a - np.asarray(rgb, float), axis=2)
-    m = (d < tol) & region & ((a.max(2) - a.min(2)) >= 20)
+    m = (d < tol) & region & ((a.max(2) - a.min(2)) >= 35)
     if palette:
         others = [np.linalg.norm(a - np.asarray(c, float), axis=2)
                   for c in palette if np.linalg.norm(np.asarray(c, float) - rgb) > 1]
@@ -1737,36 +1677,6 @@ def match_categories(pts: List[List[Any]], cats: Sequence[str], extra: Sequence[
     return out
 
 
-def complete_categories(pairs: List[Tuple[float, float, str]], ticks: Sequence[Any],
-                        max_resid: float = 0.2) -> List[Tuple[float, float, str]]:
-    """OCR found only some category labels: place the missing stage-1 categories by their index.
-    Category centres are evenly spaced, so position = a * index + b is fitted on the labels that
-    were found (exact stage-1 spelling, in the right order); used only if that fit is good."""
-    cats = [str(t) for t in ticks or [] if t not in (None, "", "UNKNOWN")]
-    if len(cats) < 3 or len(pairs) < 2 or len(pairs) >= len(cats):
-        return pairs
-    low = [c.strip().lower() for c in cats]
-    idx = []
-    for cx, cy, t in pairs:
-        k = str(t).strip().lower()
-        if k not in low:
-            return pairs
-        idx.append(low.index(k))
-    if len(set(idx)) != len(idx) or idx != sorted(idx):
-        return pairs
-    xs = np.array([p[0] for p in pairs], float)
-    a, b = np.polyfit(np.array(idx, float), xs, 1)
-    if a <= 0 or np.max(np.abs(a * np.array(idx) + b - xs)) > max_resid * a:
-        return pairs
-    cy = float(np.median([p[1] for p in pairs]))
-    out = list(pairs)
-    for i, c in enumerate(cats):
-        if i not in idx:
-            out.append((float(a * i + b), cy, c))
-    print(f"  [GraphGrounder] categories added by position: {[c for i, c in enumerate(cats) if i not in idx]}")
-    return sorted(out, key=lambda p: p[0])
-
-
 def snap_stage1_colors(stage1: dict, image_path: str, box: Optional[Box] = None) -> dict:
     """Post-processing of stage 1: replace each series colour by the closest colour that is
     REALLY drawn in the image (same greedy hue matching the digitizer uses).
@@ -1783,292 +1693,6 @@ def snap_stage1_colors(stage1: dict, image_path: str, box: Optional[Box] = None)
         c = cmap.get(str(i))
         s["color_px"] = None if c is None else "#%02x%02x%02x" % tuple(int(round(v)) for v in c)
     return s1
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3b. ANNOTATION FILTER - black non-data ink inside the plot area
-#
-# What it removes, inside the plot box and OUTSIDE the legend / inset boxes:
-#   * significance brackets  - an isolated thin black rule plus the short legs
-#                              at its two ends;
-#   * significance symbols   - '*', '**', '***', '#', 'n.s.', 'p<0.05', found
-#                              either above a bracket or by their OCR text;
-#   * rows of identical symbols at a constant y (a '+ + + +' row is an
-#     annotation; a flat series is drawn with a connecting line, so its markers
-#     form ONE wide component, not many separate equal blobs).
-#
-# What it never removes:
-#   * anything coloured - every coloured series is safe by construction;
-#   * THE GRIDLINES: a gridline row carries more ink than `max_len_px` even when
-#     bars chop it into bracket-sized pieces, so the whole row is skipped;
-#   * the axis lines and the frame (same test, plus the `edge` margin);
-#   * thick shapes, so a black BAR survives (a bar is not thin);
-#   * short segments, so error-bar caps survive;
-#   * the tick labels, which sit outside the eroded interior.
-#
-# It must run on the ORIGINAL figure. On an image that already carries the
-# measurement grid, the drawn gridlines are read as brackets.
-# ═══════════════════════════════════════════════════════════════════════════
-
-# OCR texts that are never data
-SIG_TEXT_RX = re.compile(
-    r"^(?:"
-    r"[*∗٭⁎#†‡§]{1,6}"     # * ** *** # ## dagger
-    r"|n\.?\s*s\.?"                                      # n.s.  ns
-    r"|p\s*[<>=≤≥]\s*0?[.,]\d+"                # p<0.05
-    r")$", re.I)
-
-PLUS_TEXT_RX = re.compile(r"^[+†]{1,3}$")
-PLUS_MARKERS = ("plus", "cross", "+", "x", "star", "asterisk")
-
-
-def _ink(arr: np.ndarray, dark: int = 135, max_chroma: int = 45) -> np.ndarray:
-    """Dark and (nearly) achromatic pixels: black ink that is not a coloured series."""
-    a = arr.astype(int)
-    return (a.mean(2) < dark) & ((a.max(2) - a.min(2)) <= max_chroma)
-
-
-def _inside_box(shape, box: Box, shrink: float = 0.0) -> np.ndarray:
-    h, w = shape[:2]
-    x1, y1, x2, y2 = box
-    x1, x2 = sorted((x1, x2))
-    y1, y2 = sorted((y1, y2))
-    m = np.zeros((h, w), bool)
-    m[max(0, int(y1 + shrink)):min(h, int(y2 - shrink) + 1),
-      max(0, int(x1 + shrink)):min(w, int(x2 - shrink) + 1)] = True
-    return m
-
-
-def _thickness(d: np.ndarray, axis: int, win: int) -> np.ndarray:
-    """Number of ink pixels in a window of length `win` along `axis`, per pixel."""
-    k = ndimage.uniform_filter1d(d.astype(np.float32), size=win, axis=axis, mode="constant")
-    return k * win
-
-
-def _free_sides(d: np.ndarray, leg: Sequence[int], x: int, gap: int = 3, frac: float = 0.75) -> bool:
-    """True when column `x` is an isolated vertical hairline along `leg`.
-    A bracket leg has white on both sides; a steep data curve keeps going sideways,
-    so without this test a near-vertical black curve is erased as a bracket leg."""
-    w = d.shape[1]
-    free = 0
-    for yy in leg:
-        l_, r_ = x - gap, x + gap
-        if (l_ < 0 or not d[yy, l_]) and (r_ >= w or not d[yy, r_]):
-            free += 1
-    return free >= frac * len(leg)
-
-
-def annotation_brackets(d: np.ndarray, inside: np.ndarray, min_len_px: int, max_len_px: int,
-                        max_thick: int = 4, edge: int = 6, max_leg_frac: float = 0.35) -> np.ndarray:
-    """Significance brackets: an isolated thin horizontal rule + the legs at its ends.
-
-    Run-based on purpose. A connected-component version grows through every gridline
-    the legs cross and wipes the whole grid.
-    """
-    out = np.zeros_like(d)
-    di = d & inside
-    if not di.any():
-        return out
-    rows_in = np.flatnonzero(inside.any(1))
-    if len(rows_in) < 3:
-        return out
-    y_lo, y_hi = int(rows_in[0]) + edge, int(rows_in[-1]) - edge
-    plot_h = int(rows_in[-1] - rows_in[0])
-    max_leg = max(4, int(max_leg_frac * plot_h))
-
-    cand = di & (_thickness(di, 0, 2 * max_thick + 3) <= max_thick)
-
-    for y in range(max(0, y_lo), min(d.shape[0], y_hi + 1)):
-        row = cand[y]
-        if not row.any():
-            continue
-        if int(di[y].sum()) > max_len_px:          # GRIDLINE / frame / reference-line row
-            continue
-        cols_in = np.flatnonzero(inside[y])
-        if len(cols_in) < 2:
-            continue
-        x_lo, x_hi = int(cols_in[0]) + edge, int(cols_in[-1]) - edge
-        for a, b in _runs(row, min_len=1, max_gap=1):
-            if not (min_len_px <= b - a + 1 <= max_len_px):
-                continue
-            out[y, a:b + 1] = True
-            for x0 in (a, b):                       # the legs, at the two ends only
-                if not (x_lo <= x0 <= x_hi):        # at the frame: an axis, not a leg
-                    continue
-                for x in range(max(0, x0 - 2), min(d.shape[1], x0 + 3)):
-                    for step in (1, -1):
-                        leg, yy = [], y + step
-                        while 0 <= yy < d.shape[0] and inside[yy, x] and d[yy, x] \
-                                and len(leg) <= max_leg:
-                            leg.append(yy)
-                            yy += step
-                        if not (4 <= len(leg) <= max_leg):   # a leg ends; an axis does not
-                            continue
-                        if _free_sides(d, leg, x):
-                            out[leg, x] = True
-    return out
-
-
-def _glyph_boxes(d: np.ndarray, inside: np.ndarray, max_h: int, max_w: int) -> List[Tuple[slice, slice]]:
-    lab, n = ndimage.label(d & inside, structure=np.ones((3, 3), bool))
-    out = []
-    for sl in ndimage.find_objects(lab):
-        if sl is None:
-            continue
-        h_, w_ = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
-        if 2 <= h_ <= max_h and 2 <= w_ <= max_w:
-            out.append(sl)
-    return out
-
-
-def glyphs_above_brackets(d: np.ndarray, inside: np.ndarray, brackets: np.ndarray,
-                          text_h: float) -> np.ndarray:
-    """Small blobs within ~2 text heights ABOVE a bracket: the '***' that labels it."""
-    out = np.zeros_like(d)
-    if not brackets.any():
-        return out
-    reach = int(max(6, 2.2 * text_h))
-    below = np.zeros_like(brackets)
-    for s in range(1, reach + 1):
-        below[:-s] |= brackets[s:]
-    for sl in _glyph_boxes(d, inside, max_h=int(2.0 * text_h) + 2, max_w=int(3.0 * text_h) + 4):
-        if below[sl].any():
-            out[sl] |= d[sl]
-    return out
-
-
-def token_glyphs(shape, tokens: Sequence[Any], inside: np.ndarray, drop_plus: bool) -> np.ndarray:
-    """Pixels of OCR tokens whose TEXT is a significance mark (and '+' when allowed)."""
-    out = np.zeros(shape[:2], bool)
-    for t in tokens or []:
-        txt = str(getattr(t, "text", "")).strip()
-        if not txt:
-            continue
-        if not (SIG_TEXT_RX.match(txt) or (drop_plus and PLUS_TEXT_RX.match(txt))):
-            continue
-        x1, y1 = int(getattr(t, "x1", 0)), int(getattr(t, "y1", 0))
-        x2, y2 = int(getattr(t, "x2", 0)), int(getattr(t, "y2", 0))
-        sl = (slice(max(0, y1 - 1), y2 + 1), slice(max(0, x1 - 1), x2 + 1))
-        if inside[sl].any():
-            out[sl] = True
-    return out
-
-
-def _same_shape(d: np.ndarray, boxes: Sequence[Tuple[slice, slice]],
-                min_iou: float = 0.72, grid: int = 9) -> bool:
-    """Do these blobs draw the SAME glyph? Each patch is rasterised onto a small square
-    and compared by IoU with the median patch. A row of '+' passes; a row of tick labels
-    (one blob per digit: '1', '0', '1', '2' ...) does not."""
-    pats = []
-    for sl in boxes:
-        patch = d[sl]
-        if patch.size == 0:
-            return False
-        ys = np.linspace(0, patch.shape[0] - 1, grid).round().astype(int)
-        xs = np.linspace(0, patch.shape[1] - 1, grid).round().astype(int)
-        pats.append(patch[np.ix_(ys, xs)].astype(np.float32))
-    ref = np.median(np.stack(pats), axis=0) >= 0.5
-    if not ref.any():
-        return False
-    ious = []
-    for p in pats:
-        b = p >= 0.5
-        union = float((b | ref).sum()) or 1.0
-        ious.append(float((b & ref).sum()) / union)
-    return float(np.mean(ious)) >= min_iou
-
-
-def annotation_rows(d: np.ndarray, inside: np.ndarray, text_h: float, min_count: int = 4,
-                    min_span: float = 0.35, y_tol: float = 3.0, size_tol: int = 2) -> np.ndarray:
-    """A row of IDENTICAL small symbols at a constant y, spread across the plot."""
-    out = np.zeros_like(d)
-    cols = np.flatnonzero(inside.any(0))
-    if len(cols) < 2:
-        return out
-    width = cols[-1] - cols[0]
-    lim = int(1.8 * text_h) + 2
-    boxes = _glyph_boxes(d, inside, max_h=lim, max_w=lim)
-    if len(boxes) < min_count:
-        return out
-    hs = np.array([sl[0].stop - sl[0].start for sl in boxes])
-    ws = np.array([sl[1].stop - sl[1].start for sl in boxes])
-    cy = np.array([(sl[0].start + sl[0].stop) / 2.0 for sl in boxes])
-    cx = np.array([(sl[1].start + sl[1].stop) / 2.0 for sl in boxes])
-    used = np.zeros(len(boxes), bool)
-    for i in np.argsort(-(hs * ws)):                       # biggest symbol first
-        if used[i] or hs[i] < 4 or ws[i] < 4:
-            continue
-        same = (np.abs(hs - hs[i]) <= size_tol) & (np.abs(ws - ws[i]) <= size_tol) & ~used
-        for j in np.flatnonzero(same):
-            k = np.flatnonzero(same & (np.abs(cy - cy[j]) <= max(y_tol, 0.3 * text_h)))
-            if len(k) < min_count:
-                continue
-            if (cx[k].max() - cx[k].min()) < min_span * width:
-                continue
-            if not _same_shape(d, [boxes[m] for m in k]):
-                continue
-            for m in k:
-                out[boxes[m]] |= d[boxes[m]]
-                used[m] = True
-            break
-    return out
-
-
-def text_height(tokens: Sequence[Any], default: float = 11.0) -> float:
-    """Median height of the OCR tokens: the natural length unit of a figure."""
-    hs = [float(getattr(t, "y2", 0)) - float(getattr(t, "y1", 0)) for t in tokens or []]
-    hs = [h for h in hs if 4 <= h <= 60]
-    return float(np.median(hs)) if hs else default
-
-
-def clean_annotations(arr: np.ndarray, box: Box, exclude: Sequence[Box] = (),
-                      tokens: Sequence[Any] = (), stage1: Optional[dict] = None,
-                      text_h: float = 11.0, margin: int = 3,
-                      min_bracket_frac: float = 0.06, max_bracket_frac: float = 0.75,
-                      glyph_dark: int = 135, line_dark: int = 190) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Return (image with the black annotations painted white, what was removed).
-
-    box     : plot area in pixels, as plot_box_from_ticks computes it
-    exclude : legend / inset boxes - left untouched, the legend must stay readable
-    tokens  : OCR tokens (GraphGrounder._ocr_tokens); optional but much safer
-    stage1  : used only to decide whether '+' is a real marker of some series
-    """
-    arr = np.asarray(arr)
-    inside = _inside_box(arr.shape, box, shrink=margin)
-    for ex in exclude or []:
-        inside &= ~_inside_box(arr.shape, ex)
-
-    # symbols are printed black; the bracket rules themselves are often thin gray
-    d = _ink(arr, dark=glyph_dark)
-    d_line = _ink(arr, dark=line_dark, max_chroma=40)
-
-    x1, _, x2, _ = box
-    min_len = int(max(10, min_bracket_frac * abs(x2 - x1)))
-    max_len = int(max_bracket_frac * abs(x2 - x1))
-
-    markers = " ".join(str((s or {}).get("marker", "")).lower()
-                       for s in ((stage1 or {}).get("series") or []))
-    drop_plus = not any(p in markers for p in PLUS_MARKERS)
-
-    br = annotation_brackets(d_line, inside, min_len_px=min_len, max_len_px=max_len)
-    gl = glyphs_above_brackets(d, inside, br, text_h)
-    tk = token_glyphs(arr.shape, tokens, inside, drop_plus)
-    # a row of tick labels sits just outside the plot and looks exactly like an
-    # annotation row, so symbol rows are searched in the eroded interior only
-    pad = int(max(4, 1.2 * text_h))
-    core = ndimage.binary_erosion(inside, np.ones((2 * pad + 1, 1), bool))
-    rw = annotation_rows(d, core, text_h) if drop_plus else np.zeros_like(d)
-
-    kill = (br | gl | tk | rw) & inside
-    kill = ndimage.binary_dilation(kill, np.ones((3, 3), bool)) & _ink(arr, dark=200, max_chroma=60) & inside
-
-    out = arr.copy()
-    out[kill] = 255
-    info = {"brackets_px": int(br.sum()), "symbols_px": int(gl.sum()),
-            "token_px": int(tk.sum()), "row_px": int(rw.sum()),
-            "total_px": int(kill.sum()), "plus_removed": bool(drop_plus)}
-    return out, info
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2200,10 +1824,7 @@ def legend_entries(tokens, names) -> Dict[str, List[Any]]:
     norm = lambda t: re.sub(r"\s+", "", str(t)).lower()
     out: Dict[str, List[Any]] = {}
     for n in [str(n) for n in names if str(n).strip()]:
-        # a number is a tick label, not legend text (series '1','2','3' = week numbers under the
-        # bars: their "swatch" was read next to the x labels and made week 3 gray)
-        c = [(difflib.SequenceMatcher(None, norm(t.text), norm(n)).ratio(), i, t) for i, t in enumerate(tokens or [])
-             if getattr(t, "num", None) is None]
+        c = [(difflib.SequenceMatcher(None, norm(t.text), norm(n)).ratio(), i, t) for i, t in enumerate(tokens or [])]
         c = [x for x in c if x[0] >= 0.75]
         if c:
             out[n] = [t for _, _, t in sorted(c, key=lambda x: (-x[0], x[1]))]
@@ -2231,7 +1852,7 @@ def _swatch(arr: np.ndarray, t, name: str = "") -> Optional[Dict[str, Any]]:
     if x2 - x1 < 3 or y2 - y1 < 3:
         return None
     px = arr[y1:y2, x1:x2].reshape(-1, 3).astype(int)
-    chroma = px[(px.max(1) - px.min(1)) >= 20]
+    chroma = px[(px.max(1) - px.min(1)) >= 40]
     if len(chroma) >= 4:
         sat = chroma.max(1) - chroma.min(1)
         core = chroma[sat >= np.median(sat)]          # core of the symbol, not its anti-aliased rim
@@ -2283,7 +1904,7 @@ class GraphGrounder:
                  coord_mode: str = "norm1000", refine: bool = True,
                  use_color: bool = True, snap_ticks: bool = True, find_regions: bool = True,
                  tick_source: str = "ocr", ocr_vlm_classify: bool = False, ocr_backend: str = "auto",
-                 legend_colors: bool = True, clean_annotations: bool = True):
+                 legend_colors: bool = True):
         """tick_source: "ocr" (OCR boxes, VLM only as fallback) or "vlm".
         ocr_backend: "auto" (tesseract if installed, else rapidocr), "tesseract" or "rapidocr".
         ocr_vlm_classify: also ask the VLM to label the OCR boxes (x_tick / y_tick /
@@ -2299,15 +1920,12 @@ class GraphGrounder:
         self.ocr_vlm_classify = ocr_vlm_classify
         self.ocr_backend = ocr_backend          # "auto" | "tesseract" | "rapidocr"
         self.legend_colors = legend_colors      # read series colours from the legend symbols (pixels)
-        self.clean_annotations = clean_annotations   # paint the black annotations white first
         self.last_stage1: Dict[str, Any] = {}
         self.last_masks: Dict[str, np.ndarray] = {}   # stage 1 actually used (normalised, colours from legend)
         self._ocr_axes: Optional[Dict[str, Any]] = None
         self.last_diagnostics: Dict[str, Any] = {}
         self.last_calibration: Dict[str, Any] = {}
         self.last_points_px: Dict[str, List[Dict[str, Any]]] = {}   # {series: [{x_px, y_px, x, y}]}
-        self.last_clean_arr: Optional[np.ndarray] = None   # figure with the black annotations removed
-        self.last_annotations: Dict[str, Any] = {}
 
     # ───────────────────────── VLM ─────────────────────────
     def _ask(self, prompt_dict: dict, image_path: str, scale: float) -> str:
@@ -2343,8 +1961,6 @@ class GraphGrounder:
                 ocr_pairs = []
         if len(ocr_pairs) >= 2:                               # exact OCR boxes: no VLM call
             self._tick_source_used[axis] = "ocr"
-            if axis == "x" and not exp:                       # categories: OCR can miss one
-                ocr_pairs = complete_categories(ocr_pairs, ticks)
             return self._axis_from_pairs(ocr_pairs, axis, log_hint)
         self._tick_source_used[axis] = "vlm"
         ticks = [str(t) for t in (ticks or []) if t not in (None, "", "UNKNOWN")]
@@ -2488,7 +2104,6 @@ class GraphGrounder:
         self._ocr_axes, self._tick_source_used, self._ocr_tokens = None, {}, []
         self.last_points_px, self.last_calibration, self.last_masks = {}, {}, {}
         self.last_palette, self.last_series_rgb = [], {}
-        self.last_clean_arr, self.last_annotations = None, {}
         if self.tick_source == "ocr":
             try:
                 toks = ocr_tokens(image_path, backend=self.ocr_backend)
@@ -2515,8 +2130,9 @@ class GraphGrounder:
                                                                    [s.get("name", "") for s in stage1["series"]]))
             for s in stage1["series"]:
                 c = legend_cols.get(s.get("name", ""))
-                if c and c["kind"] == "chromatic":        # decided below, once the plot colours are known
-                    s["color_legend"] = c["hex"]
+                if c and c["kind"] == "chromatic":        # black/gray symbol: keep the VLM's colour
+                    s["color_vlm"] = s.get("color")
+                    s["color"] = c["hex"]                     # pixels win over the VLM's colour name
         self.last_stage1 = stage1
 
         x_map, x_anc = self._build_axis(image_path, "x", stage1.get("x_ticks"), space, scale, gray)
@@ -2563,19 +2179,6 @@ class GraphGrounder:
                 if r and not (r[2] < box[0] or r[0] > box[2] or r[3] < box[1] or r[1] > box[3]):
                     exclude.append(r)
         overlay["box"], overlay["exclude"] = box, exclude
-
-        # black non-data ink (brackets, '*', '#', rows of symbols) inside the plot box and
-        # outside the legend / inset. The gridlines, the axes and the bars are kept.
-        if self.clean_annotations:
-            cleaned, ann = clean_annotations(arr, box, exclude=exclude, tokens=self._ocr_tokens,
-                                             stage1=stage1, text_h=text_height(self._ocr_tokens))
-            self.last_annotations = ann
-            self.last_diagnostics["annotations"] = ann
-            if ann["total_px"] > 0:
-                print(f"  [GraphGrounder] annotation filter: {ann}")
-                arr = cleaned                     # the digitizer reads the clean pixels
-                self.last_clean_arr = cleaned     # grid_extract draws the grid on them
-
         region = _region_mask(arr.shape, box, exclude)
         zero_px = y_map.pixel(0.0) if isinstance(y_map, NumericAxis) and not y_map.log else None
 
@@ -2583,10 +2186,6 @@ class GraphGrounder:
         masks: Dict[str, np.ndarray] = {}
         if self.use_color and series:
             palette = dominant_colors(arr, box, exclude)
-            choose_series_colors(series, palette)
-            self.last_diagnostics["series_colors"] = {s.get("name"): {k: s.get(k) for k in
-                                                      ("color", "color_vlm", "color_legend", "color_source")}
-                                                      for s in series}
             cmap = assign_colors([(s.get("name", "UNKNOWN"), s.get("color", "")) for s in series], palette)
             pal = [c for c, _ in palette]
             # for fade_other_series: every colour drawn in the plot + which one is whose
@@ -2970,19 +2569,14 @@ def parse_grid_answer(text: str, max_points: int = 60) -> List[List[Any]]:
 # fading the other series 
 def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_rgb: Optional[Sequence[float]],
                       box: Tuple[float, float, float, float], exclude: Sequence[Tuple[float, float, float, float]],
-                      out_path: str, strength: float = 0.85, min_chroma: int = 25,
-                      same_tol: float = 20.0) -> Optional[str]:
+                      out_path: str, strength: float = 0.85, min_chroma: int = 25) -> Optional[str]:
     """Copy of the figure where every COLOURED pixel of the plot area that does not belong to the
     target series is blended towards white. Axes, text, black error bars and the legend
     (excluded box) are untouched, so the VLM still sees the scale and which series it reads.
     Each coloured pixel goes to the nearest palette colour, measured to the segment
     colour -> white, so the anti-aliased (lighter) edges of lines and markers count too.
     palette  : all series colours detected in the plot (GraphGrounder.last_palette)
-    keep_rgb : colour of the series being read (None for a black/gray series -> fade all colours)
-
-    Palette entries within `same_tol` of keep_rgb are dropped before the comparison. Without
-    that, a figure with two clusters of ONE hue (a blue curve and blue dosing arrows) fades
-    the target series itself: its own pixels are nearer the other cluster than to keep_rgb."""
+    keep_rgb : colour of the series being read (None for a black/gray series -> fade all colours)"""
     arr = np.asarray(Image.open(image_path).convert("RGB")).astype(float)
     h, w = arr.shape[:2]
     region = np.zeros((h, w), bool)
@@ -3001,14 +2595,7 @@ def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_
         t = np.clip(((px - c) @ v) / max(1e-6, float(v @ v)), 0, 0.9)
         return np.linalg.norm(px - (c + t[:, None] * v), axis=1)
 
-    if keep_rgb is None:
-        others = list(palette)
-    else:                                                 # the nearest colour must be ANOTHER series,
-        k = np.asarray(keep_rgb, float)                   # not a second cluster of the same hue
-        others = [c for c in palette if np.linalg.norm(np.asarray(c, float) - k) > same_tol]
-    if not others:
-        return None
-    d_all = np.stack([seg_dist(c) for c in others], axis=1)
+    d_all = np.stack([seg_dist(c) for c in palette], axis=1)
     if keep_rgb is None:
         fade_px = np.ones(len(px), bool)
     else:
@@ -3021,35 +2608,6 @@ def fade_other_series(image_path: str, palette: Sequence[Sequence[float]], keep_
     arr[fade] = arr[fade] + (255.0 - arr[fade]) * strength
     Image.fromarray(arr.round().astype(np.uint8)).save(out_path)
     return out_path
-
-
-def series_file_tags(names: Sequence[str], max_len: int = 40) -> List[str]:
-    """Series name -> safe file-name part ('Conj-HSLN' -> 'Conj-HSLN', '% ID/g' -> 'ID_g').
-    Two series that give the same tag get _2, _3 ...; an empty tag becomes s<index>."""
-    out, seen = [], {}
-    for i, n in enumerate(names):
-        t = re.sub(r"[^A-Za-z0-9.+-]+", "_", str(n)).strip("._")[:max_len] or f"s{i}"
-        if t.lower() in ("read", "raw", "clean"):         # would clash with <base>_grid_read.png
-            t = f"series_{t}"
-        k = t.lower()
-        seen[k] = seen.get(k, 0) + 1
-        out.append(t if seen[k] == 1 else f"{t}_{seen[k]}")
-    return out
-
-
-def fade_target_ok(series: Dict[str, Any], keep_rgb: Optional[Sequence[float]]) -> Tuple[bool, str]:
-    """May the other series be faded for this one? Never when it could fade the target itself:
-    * a coloured series whose plot colour was not found (keep_rgb None would fade ALL colours);
-    * the plot colour assigned to it is far from its legend swatch (wrong colour match)."""
-    cname = str(series.get("color", ""))
-    if is_achromatic(cname):
-        return True, "black/gray series: all colours faded"
-    want = name_to_rgb(cname)
-    if keep_rgb is None:
-        return False, "colour of the series not found in the plot"
-    if want is not None and colour_match_score(want, keep_rgb, 1, 1) is None:
-        return False, f"plot colour {tuple(int(v) for v in keep_rgb)} far from legend colour {cname}"
-    return True, "ok"
 
 
 # pipeline 
@@ -3076,34 +2634,19 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     grid_path = os.path.join(out_dir, f"{base}_grid.png")
-
-    # the grounder already removed the black annotations: read the grid from those pixels,
-    # so the VLM cannot mistake a bracket or a row of symbols for a data point either
-    src = image_path
-    clean = getattr(grounder, "last_clean_arr", None)
-    if clean is not None:
-        src = os.path.join(out_dir, f"{base}_clean.png")
-        Image.fromarray(np.asarray(clean).astype(np.uint8)).save(src)
-
     data_x = cal.get("data_x") if ask_at_data_x else None
-    g = draw_value_grid(src, grid_path, cal.get("x_map"), cal["y_map"], cal["box"],
+    g = draw_value_grid(image_path, grid_path, cal.get("x_map"), cal["y_map"], cal["box"],
                         exclude=cal.get("exclude", ()), x_positions=data_x or None)
 
     out: Dict[str, Any] = {}
     faded_paths: Dict[str, str] = {}
-    all_series = stage1.get("series", [])
-    tags = series_file_tags([s.get("name", "UNKNOWN") for s in all_series])
-    for i, s in enumerate(all_series):
+    for i, s in enumerate(stage1.get("series", [])):
         name = s.get("name", "UNKNOWN")
-        tag = tags[i]
         ask_path, faded = grid_path, False
-        ok_fade, fade_note = fade_target_ok(s, series_rgb.get(name))
-        if fade_others and not ok_fade:
-            print(f"  [grid_extract] {name}: NOT fading the others ({fade_note})")
-        if fade_others and ok_fade and len(stage1.get("series", [])) > 1 and palette:
-            tmp = os.path.join(out_dir, f"{base}_faded_{tag}.png")
-            if fade_other_series(src, palette, series_rgb.get(name), cal["box"], cal.get("exclude", ()), tmp):
-                ask_path = os.path.join(out_dir, f"{base}_grid_{tag}.png")
+        if fade_others and len(stage1.get("series", [])) > 1 and palette:
+            tmp = os.path.join(out_dir, f"{base}_faded_s{i}.png")
+            if fade_other_series(image_path, palette, series_rgb.get(name), cal["box"], cal.get("exclude", ()), tmp):
+                ask_path = os.path.join(out_dir, f"{base}_grid_s{i}.png")
                 draw_value_grid(tmp, ask_path, cal.get("x_map"), cal["y_map"], cal["box"],
                                 exclude=cal.get("exclude", ()), x_positions=data_x or None)
                 os.remove(tmp)
@@ -3113,7 +2656,7 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
         raw = grounder.vlm.run_image_single_prompt_rescale(fm.format_prompt("<image>"), ask_path, scale=1.0)
         print(f"\n  [grid_extract] {s.get('name')} RAW:\n{raw}")
         pts = parse_grid_answer(raw)
-        if cal.get("x_map") is None:          # categorical x: 'HSLN' must not become 'Conj-HSLN'
+        if cal.get("x_map") is None:          # eixo x categorico: 'HSLN' nao pode virar 'Conj-HSLN'
             pts = match_categories(pts, [lab for _, lab in cal.get("x_cat", [])],
                                    extra=[str(t) for t in stage1.get("x_ticks") or [] if t not in (None, "")])
         out[s.get("name", "UNKNOWN")] = pts
@@ -3124,9 +2667,7 @@ def grid_extract(grounder, image_path: str, stage1: dict, out_dir: str, scale: f
     except Exception as e:                                  # an overlay must never break the run
         print(f"  [grid_extract] overlay not saved: {type(e).__name__}: {e}")
     return {"grid": out, "pixel": pixel, "agreement": compare_series(out, pixel, cal["y_map"]),
-            "grid_image": grid_path, "grid_read_image": read_path, "faded_grid_images": faded_paths,
-            "clean_image": src if src != image_path else None,
-            "annotations": getattr(grounder, "last_annotations", {})}
+            "grid_image": grid_path, "grid_read_image": read_path, "faded_grid_images": faded_paths}
 
 
 _PALETTE = [(220, 0, 0), (0, 110, 230), (0, 160, 0), (200, 0, 200), (230, 120, 0), (0, 170, 170)]
